@@ -17,11 +17,17 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from flask import Flask, request, jsonify
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
-    ImageSendMessage, QuickReply, QuickReplyButton,
+
+# 使用 LINE Bot SDK v3
+from linebot.v3 import WebhookHandler, LineBotApi
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.webhooks import TextMessageEvent
+from linebot.v3.models import (
+    TextMessage,
+    TextSendMessage,
+    QuickReply,
+    QuickReplyButton,
+    MessageAction,
 )
 
 from bot_core import handle_query
@@ -39,7 +45,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 
-@handler.add(MessageEvent, message=TextMessage)
+@handler.add(TextMessageEvent, pattern=".*")
 def handle_message(event):
     """處理文字訊息。"""
     user_text = event.message.text
@@ -52,16 +58,16 @@ def handle_message(event):
     quick_reply = QuickReply(
         items=[
             QuickReplyButton(
-                action={"label": "說明", "action": {"type": "text", "text": "說明"}},
+                action=MessageAction(label="說明", text="說明"),
             ),
             QuickReplyButton(
-                action={"label": "匯率", "action": {"type": "text", "text": "匯率"}},
+                action=MessageAction(label="匯率", text="匯率"),
             ),
             QuickReplyButton(
-                action={"label": "USD", "action": {"type": "text", "text": "USD"}},
+                action=MessageAction(label="USD", text="USD"),
             ),
             QuickReplyButton(
-                action={"label": "JPY", "action": {"type": "text", "text": "JPY"}},
+                action=MessageAction(label="JPY", text="JPY"),
             ),
         ]
     )
