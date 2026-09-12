@@ -174,11 +174,9 @@ def format_rate_card(result: dict, name: str, detail: bool = False) -> str:
 
 def format_from_reply(reply: BotReply) -> str:
     """依 BotReply 內容產出 HTML 訊息。"""
-    # 歡迎
-    if reply.alt_text and "歡迎" in reply.alt_text:
+    if getattr(reply, "kind", None) == "welcome":
         return format_welcome()
-    # 說明
-    if reply.alt_text and "說明" in reply.alt_text:
+    if getattr(reply, "kind", None) == "help":
         return format_help()
 
     # 匯率卡（有結構化資料）
@@ -197,14 +195,15 @@ def format_from_reply(reply: BotReply) -> str:
     title = _esc(reply.alt_text or "FOREX DESK")
     lines = raw.splitlines()
     if len(lines) > 1:
-        # 第一行若與 title 相同則跳過
         body_lines = lines[1:] if lines[0] == (reply.alt_text or "") or lines[0] in (
             "市場速覽",
             "清單：",
         ) else lines
         if lines[0].startswith("清單"):
             body_lines = lines
-        formatted = "\n".join(f"<code>{_esc(ln)}</code>" for ln in body_lines if ln.strip())
+        # 先截斷行數，避免 HTML 中途被切
+        body_lines = [ln for ln in body_lines if ln.strip()][:40]
+        formatted = "\n".join(f"<code>{_esc(ln)}</code>" for ln in body_lines)
         return f"<b>{title}</b>\n\n{formatted}\n\n<i>僅供參考，非投資建議。</i>"
 
     body = _esc(raw)
@@ -225,20 +224,32 @@ def keyboard_for(reply: BotReply) -> dict:
     return home_inline()
 
 
+def _safe_html_truncate(text: str, limit: int = 3900) -> str:
+    """截斷時避免切斷 HTML 標籤。"""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    # 若有未閉合的 <… 則回退到最後一個完整 '>' 之後
+    last_lt = cut.rfind("<")
+    last_gt = cut.rfind(">")
+    if last_lt > last_gt:
+        cut = cut[:last_lt]
+    return cut.rstrip() + "\n…"
+
+
 def build_telegram_payload(reply: BotReply) -> dict[str, Any]:
     """
     回傳統一結構：
       text, parse_mode, reply_markup, photo_bytes?, photo_caption?
     """
-    text = format_from_reply(reply)
+    text = _safe_html_truncate(format_from_reply(reply))
     payload: dict[str, Any] = {
-        "text": text[:4000],
+        "text": text,
         "parse_mode": "HTML",
         "reply_markup": keyboard_for(reply),
         "disable_web_page_preview": True,
     }
-    # 歡迎時附帶底部固定鍵盤
-    if reply.alt_text and "歡迎" in (reply.alt_text or ""):
+    if getattr(reply, "kind", None) == "welcome":
         payload["reply_keyboard"] = home_reply_keyboard()
 
     if reply.chart_bytes:

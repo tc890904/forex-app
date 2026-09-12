@@ -89,12 +89,18 @@ from tg_ui import build_telegram_payload, home_inline, normalize_telegram_text
 
 TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/webhook/telegram")
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_WEBHOOK_SECRET = (os.getenv("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+TELEGRAM_ADMIN_KEY = (os.getenv("TELEGRAM_ADMIN_KEY") or "").strip()
 tg_sender = TelegramSender(TELEGRAM_BOT_TOKEN)
 
 if tg_sender.enabled:
     logger.info("Telegram 已啟用 (token: %s...)", TELEGRAM_BOT_TOKEN[:8])
 else:
     logger.warning("TELEGRAM_BOT_TOKEN 未設定 — Telegram 無法回覆")
+if TELEGRAM_WEBHOOK_SECRET:
+    logger.info("Telegram webhook secret 已啟用")
+else:
+    logger.warning("TELEGRAM_WEBHOOK_SECRET 未設定 — webhook 未驗證來源（建議設定）")
 
 try:
     schedule_daily_warm()
@@ -278,20 +284,24 @@ def webhook():
 def health():
     line_ready = bool(LINE_CHANNEL_ACCESS_TOKEN) and bool(LINE_CHANNEL_SECRET)
     tg_ready = tg_sender.enabled
-    ready = line_ready  # LINE 為主服務；TG 為附加
+    # 任一通道就緒即視為存活（避免僅開 TG 時被 Render 判死）
+    ready = line_ready or tg_ready
     return jsonify(
         {
             "status": "healthy" if ready else "degraded",
             "ready": ready,
             "service": "forex-line-bot",
             "ui": "flex-ux-v2",
+            "line_ready": line_ready,
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
             "telegram_token_set": tg_ready,
             "telegram_webhook": TELEGRAM_WEBHOOK_PATH,
+            "telegram_secret_set": bool(TELEGRAM_WEBHOOK_SECRET),
             "server_base_url": SERVER_BASE_URL,
             "https_charts": SERVER_BASE_URL.startswith("https://"),
             "charts_dir": str(IMAGE_DIR),
+            "note": "state is in-memory; keep gunicorn workers=1",
         }
     ), (200 if ready else 503)
 
@@ -372,6 +382,40 @@ def test():
 # ============================================================
 
 
+def _tg_admin_ok() -> bool:
+    """管理 API：若有設 TELEGRAM_ADMIN_KEY 則需帶 X-Admin-Key。"""
+    if not TELEGRAM_ADMIN_KEY:
+        return True  # 未設密鑰時維持相容（建議正式環境一定要設）
+    return request.headers.get("X-Admin-Key", "") == TELEGRAM_ADMIN_KEY
+
+
+def _tg_secret_ok() -> bool:
+    if not TELEGRAM_WEBHOOK_SECRET:
+        return True
+    return request.headers.get("X-Telegram-Bot-Api-Secret-Token", "") == TELEGRAM_WEBHOOK_SECRET
+
+
+def _tg_should_handle_chat(chat: dict, message: dict) -> bool:
+    """預設僅 private；群組需 @mention 或回覆 bot。"""
+    ctype = (chat.get("type") or "private").lower()
+    if ctype == "private":
+        return True
+    text = message.get("text") or ""
+    # 指令 /start 在群組也允許
+    if text.startswith("/"):
+        return True
+    entities = message.get("entities") or []
+    for ent in entities:
+        if ent.get("type") == "mention":
+            return True
+        if ent.get("type") == "text_mention":
+            return True
+    # 回覆訊息
+    if message.get("reply_to_message"):
+        return True
+    return False
+
+
 def _tg_process_text(chat_id: str, user_id: str, text: str) -> None:
     """解析指令 → handle_query → 發送訊息／圖片。"""
     norm = normalize_telegram_text(text)
@@ -403,6 +447,10 @@ def telegram_webhook():
     Telegram 會 POST update JSON 到此。
     必須呼叫 sendMessage / sendPhoto；回傳給 TG 的 body 不會顯示給使用者。
     """
+    if not _tg_secret_ok():
+        logger.warning("Telegram webhook secret 不符")
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
     update = request.get_json(silent=True)
     if not update:
         return jsonify({"ok": False, "error": "empty"}), 400
@@ -412,6 +460,10 @@ def telegram_webhook():
         return jsonify({"ok": False, "error": "token missing"}), 503
 
     try:
+        # 忽略 edited_message（避免重跑昂貴查詢）
+        if update.get("edited_message") and not update.get("message"):
+            return jsonify({"ok": True, "skipped": "edited"})
+
         cb = update.get("callback_query")
         if cb:
             cb_id = cb.get("id")
@@ -421,12 +473,12 @@ def telegram_webhook():
             user = cb.get("from") or {}
             chat_id = str(chat.get("id") or "")
             user_id = str(user.get("id") or "unknown")
-            tg_sender.answer_callback(cb_id, "查詢中…")
+            tg_sender.answer_callback(cb_id or "", "查詢中…")
             if chat_id and data:
                 _tg_process_text(chat_id, user_id, data)
             return jsonify({"ok": True})
 
-        message = update.get("message") or update.get("edited_message") or {}
+        message = update.get("message") or {}
         chat = message.get("chat") or {}
         user = message.get("from") or {}
         chat_id = str(chat.get("id") or "")
@@ -436,8 +488,13 @@ def telegram_webhook():
         if not chat_id:
             return jsonify({"ok": True, "skipped": "no chat"})
 
+        if not _tg_should_handle_chat(chat, message):
+            return jsonify({"ok": True, "skipped": "group_no_mention"})
+
         if not text:
-            _tg_process_text(chat_id, user_id, "開始")
+            # 私訊貼圖／圖片 → 歡迎；群組非文字略過
+            if (chat.get("type") or "").lower() == "private":
+                _tg_process_text(chat_id, user_id, "開始")
             return jsonify({"ok": True})
 
         _tg_process_text(chat_id, user_id, text)
@@ -457,6 +514,7 @@ def telegram_health():
             "ready": ready,
             "token_set": ready,
             "webhook_path": TELEGRAM_WEBHOOK_PATH,
+            "secret_set": bool(TELEGRAM_WEBHOOK_SECRET),
         }
     ), (200 if ready else 503)
 
@@ -464,6 +522,8 @@ def telegram_health():
 @app.route("/telegram/set_webhook", methods=["POST"])
 def telegram_set_webhook():
     """POST JSON {\"url\": \"https://.../webhook/telegram\"}；省略 url 則用 SERVER_BASE_URL。"""
+    if not _tg_admin_ok():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     if not tg_sender.enabled:
         return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN missing"}), 503
     data = request.get_json(silent=True) or {}
@@ -472,19 +532,21 @@ def telegram_set_webhook():
         url = f"{SERVER_BASE_URL.rstrip('/')}{TELEGRAM_WEBHOOK_PATH}"
     if not url.startswith("https://"):
         return jsonify({"ok": False, "error": "url must be https", "resolved": url}), 400
-    result = tg_sender.call(
-        "setWebhook",
-        {
-            "url": url,
-            "allowed_updates": ["message", "callback_query", "edited_message"],
-            "drop_pending_updates": True,
-        },
-    )
+    payload: dict = {
+        "url": url,
+        "allowed_updates": ["message", "callback_query"],
+        "drop_pending_updates": True,
+    }
+    if TELEGRAM_WEBHOOK_SECRET:
+        payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
+    result = tg_sender.call("setWebhook", payload)
     return jsonify({"requested_url": url, **result}), (200 if result.get("ok") else 400)
 
 
 @app.route("/telegram/webhook_info", methods=["GET"])
 def telegram_webhook_info():
+    if not _tg_admin_ok():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     if not tg_sender.enabled:
         return jsonify({"ok": False, "error": "token missing"}), 503
     return jsonify(tg_sender.call("getWebhookInfo"))

@@ -215,15 +215,17 @@ def calc_kelly(win_rate: float = 0.55, payoff: float = 1.5, capital: float = 100
     q = 1 - p
     b = max(0.001, payoff)
     f = (b * p - q) / b
+    f_disp = max(0.0, f)
     return {
         "win_rate": p,
         "payoff": b,
         "capital": capital,
-        "kelly_pct": f * 100,
-        "kelly_amount": capital * max(0, f),
-        "half_kelly_pct": f / 2 * 100,
-        "half_kelly_amount": capital * max(0, f / 2),
+        "kelly_pct": f_disp * 100,
+        "kelly_amount": capital * f_disp,
+        "half_kelly_pct": f_disp / 2 * 100,
+        "half_kelly_amount": capital * f_disp / 2,
         "viable": f > 0,
+        "raw_kelly": f,
     }
 
 
@@ -278,10 +280,12 @@ def strength_ranking(results: dict[str, dict]) -> list[dict]:
 def correlation_matrix(series_map: dict[str, pd.Series]) -> pd.DataFrame:
     if len(series_map) < 2:
         return pd.DataFrame()
-    frame = pd.DataFrame(series_map).dropna(how="any")
+    frame = pd.DataFrame(series_map)
+    # pairwise：至少保留有足夠重疊的列
+    frame = frame.dropna(thresh=max(2, len(series_map) // 2))
     if frame.empty or len(frame) < 10:
         return pd.DataFrame()
-    return frame.corr()
+    return frame.corr(min_periods=10)
 
 
 def simple_ma_backtest(df: pd.DataFrame, initial: float = 10000.0) -> dict:
@@ -328,6 +332,16 @@ def simple_ma_backtest(df: pd.DataFrame, initial: float = 10000.0) -> dict:
             position = 1
             entry = price
 
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak * 100 if peak else 0
+        max_dd = max(max_dd, dd)
+
+    # 結束時未平倉 → 以最後收盤強制平倉
+    if position == 1:
+        price = float(close.iloc[-1])
+        pnl_pct = (price - entry) / entry
+        equity *= 1 + pnl_pct
+        trades.append({"pnl_pct": pnl_pct * 100, "reason": "期末平倉"})
         peak = max(peak, equity)
         dd = (peak - equity) / peak * 100 if peak else 0
         max_dd = max(max_dd, dd)

@@ -20,3 +20,7 @@ services:
         sync: false
       - key: TELEGRAM_WEBHOOK_PATH
         value: /webhook/telegram
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: TELEGRAM_ADMIN_KEY
+        sync: false

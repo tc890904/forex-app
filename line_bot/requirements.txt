@@ -7,6 +7,4 @@ gunicorn>=21.2.0
 pandas>=2.0.0
 numpy>=1.24.0
 Pillow>=10.0.0
-
-# Telegram Bot 支援
-python-telegram-bot>=20.0,<21
+# Telegram 使用 requests 直呼 Bot API（無需 python-telegram-bot）

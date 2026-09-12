@@ -8,10 +8,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from bot_core import schedule_daily_warm
+from bot_core import BotReply, handle_query, schedule_daily_warm
 from tg_api import TelegramSender
 from tg_ui import build_telegram_payload, home_inline, normalize_telegram_text
-from bot_core import BotReply, handle_query
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [tg] %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +36,6 @@ def main() -> None:
         logger.error("請設定 TELEGRAM_BOT_TOKEN")
         sys.exit(1)
 
-    # polling 前先清掉 webhook，避免衝突
     sender = TelegramSender(token)
     info = sender.call("deleteWebhook", {"drop_pending_updates": True})
     logger.info("deleteWebhook: %s", info)
@@ -52,7 +50,11 @@ def main() -> None:
     while True:
         updates = sender.call(
             "getUpdates",
-            {"timeout": 30, "offset": offset, "allowed_updates": ["message", "callback_query"]},
+            {
+                "timeout": 30,
+                "offset": offset,
+                "allowed_updates": ["message", "callback_query"],
+            },
         )
         if not updates.get("ok"):
             logger.error("getUpdates 失敗: %s", updates)
@@ -61,15 +63,26 @@ def main() -> None:
             offset = max(offset, int(upd.get("update_id", 0)) + 1)
             if upd.get("callback_query"):
                 cb = upd["callback_query"]
-                sender.answer_callback(cb["id"], "查詢中…")
-                chat_id = cb["message"]["chat"]["id"]
-                uid = str(cb["from"]["id"])
+                sender.answer_callback(cb.get("id") or "", "查詢中…")
+                msg = cb.get("message") or {}
+                chat = msg.get("chat") or {}
+                chat_id = chat.get("id")
+                if not chat_id:
+                    continue
+                uid = str((cb.get("from") or {}).get("id", "unknown"))
                 process(sender, chat_id, uid, cb.get("data") or "開始")
                 continue
             msg = upd.get("message") or {}
             if not msg:
                 continue
-            chat_id = msg["chat"]["id"]
+            chat = msg.get("chat") or {}
+            if (chat.get("type") or "private").lower() != "private":
+                text = (msg.get("text") or "")
+                if not text.startswith("/"):
+                    continue
+            chat_id = chat.get("id")
+            if not chat_id:
+                continue
             uid = str((msg.get("from") or {}).get("id", "unknown"))
             text = (msg.get("text") or "").strip() or "開始"
             process(sender, chat_id, uid, text)

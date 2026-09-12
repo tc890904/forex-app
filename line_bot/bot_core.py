@@ -11,11 +11,14 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
+
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 from charts import generate_kline_png
 from analytics import (
@@ -154,6 +157,7 @@ class BotReply:
     card_mode: str = "summary"  # summary | detail
     qr_mode: str = "home"  # home | currency | tools | market
     last_code: Optional[str] = None
+    kind: str = "generic"  # welcome | help | rate | error | generic
 
 
 # 使用者狀態（記憶體；重啟後清空）
@@ -161,26 +165,25 @@ _USER_STATE: dict[str, dict] = {}
 _USER_LOCK = threading.Lock()
 
 
-def _user_state(user_id: Optional[str]) -> dict:
-    uid = user_id or "_anon"
-    with _USER_LOCK:
-        if uid not in _USER_STATE:
-            _USER_STATE[uid] = {"last_code": "USD", "watchlist": []}
-        return _USER_STATE[uid]
-
-
 def _set_last(user_id: Optional[str], code: str) -> None:
-    st = _user_state(user_id)
+    if not user_id:
+        return  # 無 user_id 不寫入個人狀態（避免群組共用 _anon）
     with _USER_LOCK:
+        st = _USER_STATE.setdefault(user_id, {"last_code": "USD", "watchlist": []})
         st["last_code"] = code
 
 
 def _get_last(user_id: Optional[str]) -> str:
-    return _user_state(user_id).get("last_code") or "USD"
+    if not user_id:
+        return "USD"
+    with _USER_LOCK:
+        st = _USER_STATE.get(user_id) or {}
+        return st.get("last_code") or "USD"
 
 
 def _today() -> str:
-    return date.today().isoformat()
+    """台灣日曆日（牌告／快取鍵）。"""
+    return datetime.now(TAIPEI).date().isoformat()
 
 
 def _cache_get(key: str) -> Optional[list[dict]]:
@@ -209,7 +212,7 @@ def _fetch_exchange_data(currency_code: str, days: int = 120) -> list[dict]:
     if cached is not None:
         return cached
 
-    today = datetime.today()
+    today = datetime.now(TAIPEI)
     start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
     params = {
@@ -224,7 +227,9 @@ def _fetch_exchange_data(currency_code: str, days: int = 120) -> list[dict]:
         payload = resp.json()
         if payload.get("msg") == "success":
             data = payload.get("data", []) or []
-            _cache_set(cache_key, data)
+            if data:
+                _cache_set(cache_key, data)
+            # 空資料不寫長快取
             return data
         logger.warning("FinMind 非 success [%s]: %s", currency_code, payload.get("msg"))
     except Exception as e:
@@ -239,20 +244,35 @@ def schedule_daily_warm() -> None:
     with _WARM_LOCK:
         if _WARM_DAY == today:
             return
+        # 先佔位避免重複啟動；失敗時清除
         _WARM_DAY = today
 
     def _warm() -> None:
-        logger.info("開始每日預熱 %s 幣別（%s）", len(MAJOR_CURRENCIES), today)
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            list(ex.map(lambda c: _fetch_exchange_data(c, 120), MAJOR_CURRENCIES))
-        logger.info("每日預熱完成 %s", today)
+        global _WARM_DAY
+        try:
+            logger.info("開始每日預熱 %s 幣別（%s）", len(MAJOR_CURRENCIES), today)
+            with ThreadPoolExecutor(max_workers=5) as ex:
+                list(ex.map(lambda c: _fetch_exchange_data(c, 120), MAJOR_CURRENCIES))
+            logger.info("每日預熱完成 %s", today)
+        except Exception:
+            logger.exception("每日預熱失敗，允許稍後重試")
+            with _WARM_LOCK:
+                if _WARM_DAY == today:
+                    _WARM_DAY = None
 
     threading.Thread(target=_warm, daemon=True, name="forex-daily-warm").start()
 
 
 def resolve_currency(query: str) -> Optional[str]:
-    raw = query.strip()
+    """
+    嚴格解析幣別：精確別名或 3 碼代碼。
+    不接受子字串 contains（避免 USDJPY / ca / please USD 誤判）。
+    """
+    raw = (query or "").strip()
     if not raw:
+        return None
+    # 貨幣對 6 碼（如 USDJPY）→ 不自動拆
+    if len(raw) == 6 and raw.isalpha() and raw.isascii():
         return None
     q = raw.upper()
     if q in CURRENCY_ALIASES:
@@ -263,10 +283,9 @@ def resolve_currency(query: str) -> Optional[str]:
     for alias, code in CURRENCY_ALIASES.items():
         if lower == alias.lower():
             return code
-    if len(raw) >= 2:
-        for alias, code in CURRENCY_ALIASES.items():
-            if lower in alias.lower() or alias.lower() in lower:
-                return code
+    # 純 3 碼英文字母且在別名表
+    if len(q) == 3 and q.isalpha() and q.isascii() and q in CURRENCY_ALIASES:
+        return CURRENCY_ALIASES[q]
     return None
 
 
@@ -438,23 +457,32 @@ def _collect_market(codes: list[str]) -> dict[str, dict]:
 
 
 def _watchlist_get(user_id: Optional[str]) -> list[str]:
-    st = _user_state(user_id)
+    if not user_id:
+        return []
     with _USER_LOCK:
+        st = _USER_STATE.get(user_id) or {}
         return list(st.get("watchlist") or [])
 
 
-def _watchlist_add(user_id: Optional[str], code: str) -> list[str]:
-    st = _user_state(user_id)
+def _watchlist_add(user_id: Optional[str], code: str) -> tuple[list[str], bool]:
+    if not user_id:
+        return [], False
     with _USER_LOCK:
+        st = _USER_STATE.setdefault(user_id, {"last_code": "USD", "watchlist": []})
         wl = st.setdefault("watchlist", [])
-        if code not in wl and len(wl) < 10:
-            wl.append(code)
-        return list(wl)
+        if code in wl:
+            return list(wl), True
+        if len(wl) >= 10:
+            return list(wl), False
+        wl.append(code)
+        return list(wl), True
 
 
 def _watchlist_remove(user_id: Optional[str], code: str) -> list[str]:
-    st = _user_state(user_id)
+    if not user_id:
+        return []
     with _USER_LOCK:
+        st = _USER_STATE.setdefault(user_id, {"last_code": "USD", "watchlist": []})
         wl = st.setdefault("watchlist", [])
         st["watchlist"] = [c for c in wl if c != code]
         return list(st["watchlist"])
@@ -514,6 +542,7 @@ def _reply_currency(
         card_mode="detail" if detail else "summary",
         qr_mode="currency",
         last_code=code,
+        kind="rate",
     )
 
 
@@ -752,6 +781,7 @@ def _reply_sentiment(user_id: Optional[str] = None) -> BotReply:
             qr_mode="market",
             last_code=_get_last(user_id),
         )
+    rows.sort(key=lambda x: x["score"], reverse=True)
     return BotReply(
         alt_text="技術面情緒總覽",
         flex=build_sentiment_flex(rows),
@@ -764,13 +794,20 @@ def _reply_sentiment(user_id: Optional[str] = None) -> BotReply:
 def _extract_currency_from_command(text: str, prefixes: tuple[str, ...]) -> Optional[str]:
     t = text.strip()
     lower = t.lower()
+    skip = {"short", "long", "多", "空", "atr"}
     for p in prefixes:
         if lower.startswith(p.lower()):
             rest = t[len(p) :].strip()
             rest = rest.replace("空", " ").replace("多", " ").strip()
             if not rest:
                 return None
-            return resolve_currency(rest.split()[0] if rest.split() else rest)
+            for tok in rest.replace(",", " ").split():
+                if tok.lower() in skip or tok in skip:
+                    continue
+                code = resolve_currency(tok)
+                if code and code != "TWD":
+                    return code
+            return None
     return None
 
 
@@ -797,15 +834,19 @@ _KNOWN_CMDS = (
 
 
 def _fuzzy_command(text: str) -> Optional[str]:
-    """容錯：常見錯字／近似指令。"""
+    """容錯：僅對短字、高相似度；避免「說明書」「回測中」誤傷。"""
     import difflib
 
-    t = text.strip().lower()
-    if len(t) < 2 or len(t) > 8:
+    t = text.strip().lower().replace(" ", "")
+    if len(t) < 2 or len(t) > 4:
         return None
-    # 去掉空白後比對
-    compact = t.replace(" ", "")
-    matches = difflib.get_close_matches(compact, [c.lower() for c in _KNOWN_CMDS], n=1, cutoff=0.72)
+    # 已是完整指令前綴則交給後續邏輯
+    for c in _KNOWN_CMDS:
+        if t.startswith(c.lower()) and t != c.lower():
+            return None
+    matches = difflib.get_close_matches(
+        t, [c.lower() for c in _KNOWN_CMDS], n=1, cutoff=0.85
+    )
     if not matches:
         return None
     for c in _KNOWN_CMDS:
@@ -827,6 +868,7 @@ def handle_query(text: str, user_id: Optional[str] = None) -> BotReply:
             text_fallback="輸入幣別代碼（如 USD）或「說明」開始。",
             qr_mode="home",
             last_code=last,
+            kind="welcome",
         )
 
     # 模糊指令容錯
@@ -841,6 +883,7 @@ def handle_query(text: str, user_id: Optional[str] = None) -> BotReply:
             text_fallback="輸入「說明」查看全部指令。",
             qr_mode="home",
             last_code=last,
+            kind="help",
         )
 
     if text in ("我的清單", "清單", "watchlist"):
@@ -856,8 +899,22 @@ def handle_query(text: str, user_id: Optional[str] = None) -> BotReply:
                 text_fallback="請輸入：加入 USD",
                 qr_mode="home",
                 last_code=last,
+                kind="error",
             )
-        wl = _watchlist_add(user_id, code)
+        wl, added = _watchlist_add(user_id, code)
+        if not added:
+            return BotReply(
+                alt_text="清單已滿",
+                flex=build_error_flex(
+                    "清單已滿",
+                    f"最多 10 幣，無法加入 {code}。請先「移除」其他幣別。",
+                    "輸入「我的清單」查看。",
+                ),
+                text_fallback=f"清單已滿，無法加入 {code}",
+                qr_mode="home",
+                last_code=last,
+                kind="error",
+            )
         _set_last(user_id, code)
         return BotReply(
             alt_text=f"已加入 {code}",

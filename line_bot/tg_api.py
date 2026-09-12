@@ -58,20 +58,31 @@ class TelegramSender:
         chat_id: str | int,
         text: str,
         reply_markup: Optional[dict] = None,
-        parse_mode: str = "HTML",
+        parse_mode: Optional[str] = "HTML",
         reply_to: Optional[int] = None,
     ) -> dict:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
         if reply_to:
             payload["reply_to_message_id"] = reply_to
-        return self.call("sendMessage", payload)
+        result = self.call("sendMessage", payload)
+        # HTML 失敗時 fallback 純文字
+        if not result.get("ok") and parse_mode:
+            logger.warning("sendMessage HTML 失敗，改送純文字")
+            import re
+
+            plain = re.sub(r"<[^>]+>", "", text)
+            return self.send_message(
+                chat_id, plain, reply_markup=reply_markup, parse_mode=None, reply_to=reply_to
+            )
+        return result
 
     def send_photo(
         self,
@@ -79,17 +90,30 @@ class TelegramSender:
         photo_bytes: bytes,
         caption: str = "",
         reply_markup: Optional[dict] = None,
-        parse_mode: str = "HTML",
+        parse_mode: Optional[str] = "HTML",
     ) -> dict:
         data: dict[str, Any] = {
             "chat_id": str(chat_id),
             "caption": (caption or "")[:1024],
-            "parse_mode": parse_mode,
         }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         if reply_markup:
             data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
         files = {"photo": ("chart.png", photo_bytes, "image/png")}
-        return self.call("sendPhoto", data, files=files)
+        result = self.call("sendPhoto", data, files=files)
+        if not result.get("ok") and parse_mode:
+            import re
+
+            plain = re.sub(r"<[^>]+>", "", caption or "")
+            data2 = {
+                "chat_id": str(chat_id),
+                "caption": plain[:1024],
+            }
+            if reply_markup:
+                data2["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+            return self.call("sendPhoto", data2, files=files)
+        return result
 
     def answer_callback(self, callback_query_id: str, text: str = "") -> dict:
         return self.call(
@@ -101,33 +125,36 @@ class TelegramSender:
         return self.call("sendChatAction", {"chat_id": chat_id, "action": action})
 
     def deliver(self, chat_id: str | int, payload: dict) -> None:
-        """依 tg_ui.build_telegram_payload 結果發送。"""
-        # 先發文字（含 inline keyboard）
+        """依 tg_ui.build_telegram_payload 結果發送；檢查回傳並記錄。"""
         markup = payload.get("reply_markup")
-        # 歡迎時改用 reply keyboard（並可再補 inline）
+        parse_mode = payload.get("parse_mode", "HTML")
+        text = payload.get("text") or "(無內容)"
+
         if payload.get("reply_keyboard"):
-            self.send_message(
+            r = self.send_message(
                 chat_id,
-                payload["text"],
+                text,
                 reply_markup=payload["reply_keyboard"],
-                parse_mode=payload.get("parse_mode", "HTML"),
+                parse_mode=parse_mode,
             )
-            # 再補一則快捷 inline（可選，避免洗版：改為同則僅 reply keyboard）
         else:
-            self.send_message(
+            r = self.send_message(
                 chat_id,
-                payload["text"],
+                text,
                 reply_markup=markup,
-                parse_mode=payload.get("parse_mode", "HTML"),
+                parse_mode=parse_mode,
             )
+        if not r.get("ok"):
+            logger.error("文字訊息送出失敗 chat=%s: %s", chat_id, r)
 
         photo = payload.get("photo_bytes")
         if photo:
-            # 圖片附帶精簡 caption + 同一組 inline（方便操作）
-            self.send_photo(
+            pr = self.send_photo(
                 chat_id,
                 photo,
                 caption=payload.get("photo_caption") or "",
                 reply_markup=markup if not payload.get("reply_keyboard") else None,
-                parse_mode=payload.get("parse_mode", "HTML"),
+                parse_mode=parse_mode,
             )
+            if not pr.get("ok"):
+                logger.error("圖片送出失敗 chat=%s: %s", chat_id, pr)
