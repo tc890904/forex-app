@@ -83,6 +83,19 @@ SERVER_BASE_URL = (
     or "http://localhost:8080"
 ).rstrip("/")
 
+# Telegram（與 LINE 共用同一 Flask app）
+from tg_api import TelegramSender
+from tg_ui import build_telegram_payload, home_inline, normalize_telegram_text
+
+TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/webhook/telegram")
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+tg_sender = TelegramSender(TELEGRAM_BOT_TOKEN)
+
+if tg_sender.enabled:
+    logger.info("Telegram 已啟用 (token: %s...)", TELEGRAM_BOT_TOKEN[:8])
+else:
+    logger.warning("TELEGRAM_BOT_TOKEN 未設定 — Telegram 無法回覆")
+
 try:
     schedule_daily_warm()
 except Exception:
@@ -263,7 +276,9 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    ready = bool(LINE_CHANNEL_ACCESS_TOKEN) and bool(LINE_CHANNEL_SECRET)
+    line_ready = bool(LINE_CHANNEL_ACCESS_TOKEN) and bool(LINE_CHANNEL_SECRET)
+    tg_ready = tg_sender.enabled
+    ready = line_ready  # LINE 為主服務；TG 為附加
     return jsonify(
         {
             "status": "healthy" if ready else "degraded",
@@ -272,6 +287,8 @@ def health():
             "ui": "flex-ux-v2",
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
+            "telegram_token_set": tg_ready,
+            "telegram_webhook": TELEGRAM_WEBHOOK_PATH,
             "server_base_url": SERVER_BASE_URL,
             "https_charts": SERVER_BASE_URL.startswith("https://"),
             "charts_dir": str(IMAGE_DIR),
@@ -351,83 +368,126 @@ def test():
 
 
 # ============================================================
-# Telegram Webhook Support
+# Telegram Webhook Routes
 # ============================================================
-TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/webhook/telegram")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or ""
-TG_MAX_LEN = 4000
-
-if TELEGRAM_BOT_TOKEN:
-    logger.info("Telegram webhook 已啟用 (token: %s...)", TELEGRAM_BOT_TOKEN[:8])
-else:
-    logger.warning("TELEGRAM_BOT_TOKEN 未設定 — Telegram webhook 將無法運作")
 
 
-def _tg_truncate(text: str) -> str:
-    if len(text) <= TG_MAX_LEN:
-        return text
-    return text[: TG_MAX_LEN - 30] + "\n\n…（已截斷）"
+def _tg_process_text(chat_id: str, user_id: str, text: str) -> None:
+    """解析指令 → handle_query → 發送訊息／圖片。"""
+    norm = normalize_telegram_text(text)
+    logger.info("Telegram 處理: raw=%r norm=%r user=%s", text, norm, user_id)
+
+    tg_sender.send_chat_action(chat_id, "typing")
+
+    try:
+        reply = handle_query(norm, user_id=f"tg:{user_id}")
+    except Exception:
+        logger.exception("Telegram handle_query 失敗")
+        tg_sender.send_message(
+            chat_id,
+            "暫時無法處理，請稍後再試。\n輸入 <b>說明</b> 查看指令。",
+            reply_markup=home_inline(),
+        )
+        return
+
+    if not isinstance(reply, BotReply):
+        reply = BotReply(alt_text="訊息", flex=None, text_fallback=str(reply))
+
+    payload = build_telegram_payload(reply)
+    tg_sender.deliver(chat_id, payload)
 
 
 @app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
-    """Telegram webhook — 文字 + K 線圖片。"""
-    if not request.is_json:
-        return jsonify({"error": "expected json"}), 400
+    """
+    Telegram 會 POST update JSON 到此。
+    必須呼叫 sendMessage / sendPhoto；回傳給 TG 的 body 不會顯示給使用者。
+    """
+    update = request.get_json(silent=True)
+    if not update:
+        return jsonify({"ok": False, "error": "empty"}), 400
 
-    update_dict = request.get_json(silent=True)
-    if not update_dict:
-        return jsonify({"error": "empty body"}), 400
+    if not tg_sender.enabled:
+        logger.error("收到 Telegram update 但未設定 TELEGRAM_BOT_TOKEN")
+        return jsonify({"ok": False, "error": "token missing"}), 503
 
     try:
-        message = update_dict.get("message", {})
-        chat = message.get("chat", {})
-        user = message.get("from", {})
-        text = message.get("text", "").strip()
-        update_id = update_dict.get("update_id")
+        cb = update.get("callback_query")
+        if cb:
+            cb_id = cb.get("id")
+            data = (cb.get("data") or "").strip()
+            msg = cb.get("message") or {}
+            chat = msg.get("chat") or {}
+            user = cb.get("from") or {}
+            chat_id = str(chat.get("id") or "")
+            user_id = str(user.get("id") or "unknown")
+            tg_sender.answer_callback(cb_id, "查詢中…")
+            if chat_id and data:
+                _tg_process_text(chat_id, user_id, data)
+            return jsonify({"ok": True})
+
+        message = update.get("message") or update.get("edited_message") or {}
+        chat = message.get("chat") or {}
+        user = message.get("from") or {}
+        chat_id = str(chat.get("id") or "")
+        user_id = str(user.get("id") or "unknown")
+        text = (message.get("text") or "").strip()
+
+        if not chat_id:
+            return jsonify({"ok": True, "skipped": "no chat"})
 
         if not text:
-            return jsonify({"status": "skipped"}), 200
+            _tg_process_text(chat_id, user_id, "開始")
+            return jsonify({"ok": True})
 
-        user_id = str(user.get("id", "unknown"))
-        chat_id = str(chat.get("id", "unknown"))
+        _tg_process_text(chat_id, user_id, text)
+        return jsonify({"ok": True})
 
-        logger.info("Telegram 收到: %s (user=%s, chat=%s)", text, user_id, chat_id)
-
-        reply = handle_query(text, user_id=user_id)
-        if not isinstance(reply, BotReply):
-            reply = BotReply(
-                alt_text=text,
-                flex=None,
-                text_fallback=str(reply),
-            )
-
-        text_out = _tg_truncate(reply.text_fallback or reply.alt_text or "(無內容)")
-
-        result = {"update_id": update_id, "chat_id": chat_id, "text": text_out}
-
-        # 若有 K 線圖，編碼為 base64（前端可 decode 發送）
-        if reply.chart_bytes:
-            import base64
-            result["photo"] = base64.b64encode(reply.chart_bytes).decode("utf-8")
-            result["photo_caption"] = reply.alt_text or ""
-
-        return jsonify(result), 200
-
-    except Exception as exc:
-        logger.exception("Telegram webhook 處理失敗")
-        return jsonify({"error": str(exc)}), 500
+    except Exception:
+        logger.exception("Telegram webhook 未預期錯誤")
+        return jsonify({"ok": True, "note": "error logged"})
 
 
 @app.route("/telegram/health", methods=["GET"])
 def telegram_health():
-    ready = bool(TELEGRAM_BOT_TOKEN)
-    return jsonify({
-        "service": "forex-telegram-bot",
-        "ready": ready,
-        "token_set": bool(TELEGRAM_BOT_TOKEN),
-        "webhook_path": TELEGRAM_WEBHOOK_PATH,
-    }), (200 if ready else 503)
+    ready = tg_sender.enabled
+    return jsonify(
+        {
+            "service": "forex-telegram-bot",
+            "ready": ready,
+            "token_set": ready,
+            "webhook_path": TELEGRAM_WEBHOOK_PATH,
+        }
+    ), (200 if ready else 503)
+
+
+@app.route("/telegram/set_webhook", methods=["POST"])
+def telegram_set_webhook():
+    """POST JSON {\"url\": \"https://.../webhook/telegram\"}；省略 url 則用 SERVER_BASE_URL。"""
+    if not tg_sender.enabled:
+        return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN missing"}), 503
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        url = f"{SERVER_BASE_URL.rstrip('/')}{TELEGRAM_WEBHOOK_PATH}"
+    if not url.startswith("https://"):
+        return jsonify({"ok": False, "error": "url must be https", "resolved": url}), 400
+    result = tg_sender.call(
+        "setWebhook",
+        {
+            "url": url,
+            "allowed_updates": ["message", "callback_query", "edited_message"],
+            "drop_pending_updates": True,
+        },
+    )
+    return jsonify({"requested_url": url, **result}), (200 if result.get("ok") else 400)
+
+
+@app.route("/telegram/webhook_info", methods=["GET"])
+def telegram_webhook_info():
+    if not tg_sender.enabled:
+        return jsonify({"ok": False, "error": "token missing"}), 503
+    return jsonify(tg_sender.call("getWebhookInfo"))
 
 
 if __name__ == "__main__":

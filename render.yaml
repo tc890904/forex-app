@@ -16,3 +16,7 @@ services:
         sync: false
       - key: SERVER_BASE_URL
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_PATH
+        value: /webhook/telegram

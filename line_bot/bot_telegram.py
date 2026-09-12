@@ -1,151 +1,79 @@
-"""
-Telegram Bot Handler — FOREX DESK
-
-整合現有 bot_core 的 handle_query 邏輯。
-"""
-
+#!/usr/bin/env python3
+"""Telegram Bot — FOREX DESK（本機 polling；正式環境用 webhook）"""
 from __future__ import annotations
 
-import asyncio
-import io
 import logging
 import os
-from typing import Optional
+import sys
 
-from telegram import Update, constants
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+sys.path.insert(0, os.path.dirname(__file__))
 
-from bot_core import BotReply, handle_query, schedule_daily_warm
+from bot_core import schedule_daily_warm
+from tg_api import TelegramSender
+from tg_ui import build_telegram_payload, home_inline, normalize_telegram_text
+from bot_core import BotReply, handle_query
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s [telegram] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [tg] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Telegram 每則訊息字數限制
-MAX_TEXT_LEN = 4096
 
-
-def _truncate(text: str) -> str:
-    """截斷過長文字，保留結尾。"""
-    if len(text) <= MAX_TEXT_LEN:
-        return text
-    return text[: MAX_TEXT_LEN - 30] + "\n\n…（已截斷）"
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """處理 /start 指令。"""
-    welcome = (
-        "🌐 FOREX DESK 外匯分析\n\n"
-        "直接輸入幣別代碼查詢匯率：\n"
-        "• USD → 美元/台幣\n"
-        "• JPY → 日圓/台幣\n"
-        "• EUR → 歐元/台幣\n\n"
-        "輸入「說明」查看所有指令。"
-    )
-    await update.effective_message.reply_text(
-        welcome,
-        parse_mode=constants.ParseMode.MARKDOWN,
-    )
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """處理 /help 指令。"""
-    reply = handle_query("說明")
-    if isinstance(reply, BotReply):
-        await update.effective_message.reply_text(
-            _truncate(reply.text_fallback or reply.alt_text),
-            parse_mode=constants.ParseMode.MARKDOWN,
-        )
-    else:
-        await update.effective_message.reply_text(str(reply))
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """處理一般文字訊息。"""
-    user_id = str(update.effective_user.id)
-    text = update.effective_message.text.strip()
-    
-    logger.info("Telegram 收到: %s (user=%s)", text, user_id)
-
+def process(sender: TelegramSender, chat_id: int, user_id: str, text: str) -> None:
+    norm = normalize_telegram_text(text)
+    sender.send_chat_action(chat_id, "typing")
     try:
-        reply = handle_query(text, user_id=user_id)
-    except Exception as exc:
-        logger.exception("handle_query 失敗")
-        await update.effective_message.reply_text("系統錯誤，請稍後再試。")
+        reply = handle_query(norm, user_id=f"tg:{user_id}")
+    except Exception:
+        logger.exception("query failed")
+        sender.send_message(chat_id, "系統錯誤，請稍後再試。", reply_markup=home_inline())
         return
-
     if not isinstance(reply, BotReply):
-        await update.effective_message.reply_text(str(reply))
-        return
-
-    # 發送文字內容
-    text_out = _truncate(reply.text_fallback or reply.alt_text or "(無內容)")
-    sent = await update.effective_message.reply_text(
-        text_out,
-        parse_mode=constants.ParseMode.MARKDOWN,
-    )
-
-    # 若有 K 線圖則附加
-    if reply.chart_bytes and len(reply.chart_bytes) > 0:
-        try:
-            buf = io.BytesIO(reply.chart_bytes)
-            buf.name = f"chart_{reply.last_code or 'USD'}.png"
-            await sent.reply_photo(
-                photo=buf,
-                caption=f"📊 {reply.alt_text}",
-                parse_mode=constants.ParseMode.MARKDOWN,
-            )
-        except Exception:
-            logger.exception("發送 K 線圖失敗")
+        reply = BotReply(alt_text="訊息", flex=None, text_fallback=str(reply))
+    sender.deliver(chat_id, build_telegram_payload(reply))
 
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """全域錯誤處理。"""
-    logger.error("Telegram 錯誤: %s", context.error, exc_info=context.error)
-    if update and hasattr(update, "effective_message"):
-        try:
-            await update.effective_message.reply_text("系統異常，請稍後再試。")
-        except Exception:
-            pass
-
-
-def create_telegram_app(token: Optional[str] = None) -> Application:
-    """建立並回傳 Telegram Application。"""
-    token = token or os.getenv("TELEGRAM_BOT_TOKEN")
+def main() -> None:
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN 未設定")
+        logger.error("請設定 TELEGRAM_BOT_TOKEN")
+        sys.exit(1)
 
-    # 啟動時預熱資料
+    # polling 前先清掉 webhook，避免衝突
+    sender = TelegramSender(token)
+    info = sender.call("deleteWebhook", {"drop_pending_updates": True})
+    logger.info("deleteWebhook: %s", info)
+
     try:
         schedule_daily_warm()
     except Exception:
         logger.exception("預熱失敗")
 
-    app = Application.builder().token(token).build()
-
-    # 註冊 handler
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_error_handler(error_handler)
-
-    return app
-
-
-def run_telegram_bot(token: Optional[str] = None, poll_timeout: int = 30) -> None:
-    """以 polling 模式啟動（適合本機測試）。"""
-    app = create_telegram_app(token)
-    logger.info("Telegram bot 啟動中...")
-    app.run_polling(timeout=poll_timeout, drop_pending_updates=True)
+    offset = 0
+    logger.info("Telegram polling 啟動…")
+    while True:
+        updates = sender.call(
+            "getUpdates",
+            {"timeout": 30, "offset": offset, "allowed_updates": ["message", "callback_query"]},
+        )
+        if not updates.get("ok"):
+            logger.error("getUpdates 失敗: %s", updates)
+            continue
+        for upd in updates.get("result") or []:
+            offset = max(offset, int(upd.get("update_id", 0)) + 1)
+            if upd.get("callback_query"):
+                cb = upd["callback_query"]
+                sender.answer_callback(cb["id"], "查詢中…")
+                chat_id = cb["message"]["chat"]["id"]
+                uid = str(cb["from"]["id"])
+                process(sender, chat_id, uid, cb.get("data") or "開始")
+                continue
+            msg = upd.get("message") or {}
+            if not msg:
+                continue
+            chat_id = msg["chat"]["id"]
+            uid = str((msg.get("from") or {}).get("id", "unknown"))
+            text = (msg.get("text") or "").strip() or "開始"
+            process(sender, chat_id, uid, text)
 
 
 if __name__ == "__main__":
-    run_telegram_bot()
+    main()
