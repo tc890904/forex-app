@@ -1,13 +1,14 @@
 """
-LINE Bot Webhook Server - Final Version with Quick Replies
+LINE Bot Webhook Server - With Image Support via Static Files
 
 使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
-支援文字訊息和快速回覆按鈕。
+支援文字訊息、圖片訊息（匯率圖卡）和快速回覆按鈕。
 """
 
 import os
 import sys
 import logging
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -17,13 +18,15 @@ load_dotenv()
 # 添加當前目錄到 Python 路徑
 sys.path.insert(0, str(Path(__file__).parent))
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
+from datetime import datetime
 
 # 使用 LINE Bot SDK v3
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import MessageEvent
-from linebot.models import TextSendMessage, QuickReply, QuickReplyButton, MessageAction
+from linebot.v3.messaging import ImageMessage, TextMessage, ReplyMessageRequest
+from linebot.models import QuickReply, QuickReplyButton, MessageAction
 from linebot import LineBotApi
 
 from bot_core import handle_query
@@ -32,6 +35,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# 建立圖片儲存目錄
+IMAGE_DIR = Path(__file__).parent / "static" / "images"
+IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 # LINE Bot 設定（從環境變數讀取）
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
@@ -81,6 +88,22 @@ QUICK_REPLY_ITEMS = [
 ]
 QUICK_REPLY = QuickReply(items=QUICK_REPLY_ITEMS)
 
+# 伺服器基礎 URL（從環境變數讀取，或預設為 localhost）
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "http://localhost:8080")
+
+
+def save_image_to_disk(image_bytes: bytes, filename: str = None) -> str:
+    """將圖片保存到 static/images 目錄，並返回可訪問的 URL。"""
+    if filename is None:
+        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
+    
+    filepath = IMAGE_DIR / filename
+    with open(filepath, "wb") as f:
+        f.write(image_bytes)
+    
+    # 返回可訪問的 URL
+    return f"{SERVER_BASE_URL}/static/images/{filename}"
+
 
 @handler.add(MessageEvent)
 def handle_message(event):
@@ -89,24 +112,42 @@ def handle_message(event):
         user_text = event.message.text
         logger.info(f"收到訊息: {user_text}")
 
-        # 處理查詢
+        # 處理查詢，回傳 (文字, 圖片資料)
         result = handle_query(user_text)
         
         # handle_query 返回 tuple (text, image_data)
         if isinstance(result, tuple):
             reply_text = result[0]
+            image_data = result[1] if len(result) > 1 else None
         else:
             reply_text = result
+            image_data = None
 
-        # 發送文字訊息（包含快速回覆按鈕）
-        reply_message = TextSendMessage(
-            text=reply_text,
-            quickReply=QUICK_REPLY
-        )
+        # 準備要發送的訊息列表
+        messages = []
         
+        # 如果有圖片，先保存並發送圖片
+        if image_data:
+            try:
+                image_url = save_image_to_disk(image_data)
+                logger.info(f"圖片已保存: {image_url}")
+                messages.append(ImageMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url
+                ))
+            except Exception as e:
+                logger.error(f"保存图片時出錯: {e}")
+        
+        # 添加文字訊息（包含快速按鈕）
+        messages.append(TextMessage(
+            text=reply_text,
+            quick_reply=QUICK_REPLY
+        ))
+
+        # 發送訊息
         line_bot_api.reply_message(
             event.reply_token,
-            reply_message
+            messages
         )
         logger.info(f"已回覆成功")
         
@@ -116,7 +157,7 @@ def handle_message(event):
             error_msg = f"⚠️ 錯誤: {str(e)[:100]}"
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=error_msg)
+                TextMessage(text=error_msg)
             )
         except:
             pass
@@ -159,11 +200,21 @@ def test():
         result = handle_query(text)
         if isinstance(result, tuple):
             reply_text = result[0]
+            image_data = result[1] if len(result) > 1 else None
         else:
             reply_text = result
+            image_data = None
+        
+        # 如果有圖片，保存並返回 URL
+        image_url = None
+        if image_data:
+            image_url = save_image_to_disk(image_data)
+        
         return jsonify({
             "original": text,
             "reply": reply_text,
+            "image_url": image_url,
+            "has_image": image_data is not None,
             "success": True,
         })
     except Exception as e:
@@ -181,4 +232,5 @@ if __name__ == "__main__":
     logger.info(f"Webhook URL: http://localhost:{port}/webhook")
     logger.info(f"Health Check: http://localhost:{port}/health")
     logger.info(f"Test API:     POST http://localhost:{port}/test")
+    logger.info(f"Images URL:   http://localhost:{port}/static/images/")
     app.run(host="0.0.0.0", port=port, debug=True)

@@ -242,16 +242,16 @@ def generate_rate_card(currency_code: str) -> Optional[bytes]:
     t = result["tech"]
 
     # 建立圖片 (深色主題)
-    width, height = 420, 300
+    width, height = 420, 320
     img = Image.new('RGB', (width, height), color='#1a1a2e')
     draw = ImageDraw.Draw(img)
 
     # 嘗試載入字體
     try:
-        font_title = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 26)
-        font_currency = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 52)
-        font_body = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 20)
-        font_small = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 16)
+        font_title = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 28)
+        font_currency = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 56)
+        font_body = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 22)
+        font_small = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 18)
     except:
         font_title = ImageFont.load_default()
         font_currency = ImageFont.load_default()
@@ -261,27 +261,27 @@ def generate_rate_card(currency_code: str) -> Optional[bytes]:
     # 標題
     icon = CURRENCY_ICONS.get(currency_code, "💱")
     draw.text((25, 25), f"{icon} {currency_code}/TWD", fill='white', font=font_title)
-    draw.text((25, 60), f"更新日期: {r['date']}", fill='#888888', font=font_small)
+    draw.text((25, 65), f"更新日期: {r['date']}", fill='#888888', font=font_small)
 
     # 匯率數字
     rate_text = f"{r['spot_sell']:.4f}"
-    draw.text((25, 100), rate_text, fill='white', font=font_currency)
-    draw.text((25 + len(rate_text) * 16, 112), "TWD", fill='#888888', font=font_body)
+    draw.text((25, 110), rate_text, fill='white', font=font_currency)
+    draw.text((25 + len(rate_text) * 18, 125), "TWD", fill='#888888', font=font_body)
 
     # 漲跌幅
     if t["change_pct"] is not None:
         change_text = f"{t['change_pct']:+.2f}%"
         change_color = '#10b981' if t["change_pct"] > 0 else '#ef4444'
-        draw.text((25, 170), change_text, fill=change_color, font=font_body)
+        draw.text((25, 190), change_text, fill=change_color, font=font_body)
 
     # 情緒標籤
     mood_color = '#10b981' if result["score"] > 0 else ('#ef4444' if result["score"] < 0 else '#f59e0b')
-    draw.text((25, 210), result["mood"], fill=mood_color, font=font_body)
+    draw.text((25, 230), result["mood"], fill=mood_color, font=font_body)
 
     # 技術指標
     if t["rsi"]:
         rsi_color = '#ef4444' if t["rsi"] > 70 else ('#10b981' if t["rsi"] < 30 else '#f59e0b')
-        draw.text((25, 250), f"RSI: {t['rsi']:.1f}", fill=rsi_color, font=font_small)
+        draw.text((25, 270), f"RSI: {t['rsi']:.1f}", fill=rsi_color, font=font_small)
 
     # 轉為 bytes
     buf = io.BytesIO()
