@@ -1,20 +1,23 @@
 """
 LINE Bot — 外匯行情查詢機器人
 
-回傳結構化 BotReply（Flex UI + 可選圖卡）。
+回傳結構化 BotReply（Flex 分析卡 + 可選 K 線圖 bytes）。
+資料快取以「當日」為單位，確保每天更新。
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 import pandas as pd
 import requests
 
+from charts import generate_kline_png
 from ui import (
     build_error_flex,
     build_help_flex,
@@ -67,6 +70,8 @@ CURRENCY_ALIASES: dict[str, str] = {
     "馬來幣": "MYR",
     "美金": "USD",
     "台幣": "TWD",
+    "瑞郎": "CHF",
+    "新幣": "SGD",
 }
 
 CURRENCY_NAMES = {
@@ -102,42 +107,51 @@ MAJOR_CURRENCIES = [
     "HKD",
     "SGD",
     "CNY",
+    "NZD",
 ]
 
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_DATASET = "TaiwanExchangeRate"
 API_TIMEOUT = 8
 
-_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_CACHE_TTL_SEC = 60.0
+_CACHE: dict[str, tuple[str, list[dict]]] = {}
+_WARM_DAY: Optional[str] = None
+_WARM_LOCK = threading.Lock()
 
 
 @dataclass
 class BotReply:
-    """統一回覆結構：僅 Flex 分析卡 + 文字備援。"""
+    """Flex 分析卡 + 可選 K 線 PNG（由 server 掛成 Flex hero）。"""
 
     alt_text: str
     flex: Any
     text_fallback: str
+    chart_bytes: Optional[bytes] = None
+    _rate_result: Optional[dict] = field(default=None, repr=False)
+    _currency_name: Optional[str] = field(default=None, repr=False)
+
+
+def _today() -> str:
+    return date.today().isoformat()
 
 
 def _cache_get(key: str) -> Optional[list[dict]]:
     item = _CACHE.get(key)
     if not item:
         return None
-    ts, data = item
-    if datetime.now().timestamp() - ts > _CACHE_TTL_SEC:
+    cache_day, data = item
+    if cache_day != _today():
         _CACHE.pop(key, None)
         return None
     return data
 
 
 def _cache_set(key: str, data: list[dict]) -> None:
-    _CACHE[key] = (datetime.now().timestamp(), data)
+    _CACHE[key] = (_today(), data)
 
 
-def _fetch_exchange_data(currency_code: str, days: int = 90) -> list[dict]:
-    cache_key = f"{currency_code}:{days}"
+def _fetch_exchange_data(currency_code: str, days: int = 120) -> list[dict]:
+    cache_key = f"{_today()}:{currency_code}:{days}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -163,6 +177,24 @@ def _fetch_exchange_data(currency_code: str, days: int = 90) -> list[dict]:
     except Exception as e:
         logger.error("API 錯誤 [%s]: %s", currency_code, e)
     return []
+
+
+def schedule_daily_warm() -> None:
+    """背景預熱主要貨幣，確保當日資料就緒。"""
+    global _WARM_DAY
+    today = _today()
+    with _WARM_LOCK:
+        if _WARM_DAY == today:
+            return
+        _WARM_DAY = today
+
+    def _warm() -> None:
+        logger.info("開始每日預熱 %s 幣別（%s）", len(MAJOR_CURRENCIES), today)
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            list(ex.map(lambda c: _fetch_exchange_data(c, 120), MAJOR_CURRENCIES))
+        logger.info("每日預熱完成 %s", today)
+
+    threading.Thread(target=_warm, daemon=True, name="forex-daily-warm").start()
 
 
 def resolve_currency(query: str) -> Optional[str]:
@@ -284,7 +316,14 @@ def analyze_currency(currency_code: str) -> dict:
     else:
         mood = "中性"
 
-    return {"rate": rate, "tech": tech, "mood": mood, "signals": signals, "score": score}
+    return {
+        "rate": rate,
+        "tech": tech,
+        "mood": mood,
+        "signals": signals,
+        "score": score,
+        "records": records,
+    }
 
 
 def _rate_text_fallback(result: dict, name: str) -> str:
@@ -325,11 +364,25 @@ def _reply_currency(code: str) -> BotReply:
             flex=build_error_flex("查無資料", result["error"]),
             text_fallback=result["error"],
         )
+
+    chart = None
+    try:
+        chart = generate_kline_png(
+            result.get("records") or [],
+            title=f"{code}/TWD 日K",
+            limit=40,
+        )
+    except Exception:
+        logger.exception("產生 K 線失敗 [%s]", code)
+
     alt = f"{code} {result['rate']['spot_sell']:.4f} {result['mood']}"
     return BotReply(
         alt_text=alt,
-        flex=build_rate_flex(result, name),
+        flex=build_rate_flex(result, name, chart_url=None),
         text_fallback=_rate_text_fallback(result, name),
+        chart_bytes=chart,
+        _rate_result=result,
+        _currency_name=name,
     )
 
 
@@ -349,6 +402,7 @@ def _reply_market() -> BotReply:
 
 def handle_query(text: str) -> BotReply:
     """處理用戶輸入，回傳 BotReply。"""
+    schedule_daily_warm()
     text = (text or "").strip()
 
     if not text:

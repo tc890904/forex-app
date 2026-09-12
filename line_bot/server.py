@@ -1,7 +1,7 @@
 """
 LINE Bot Webhook Server
 
-純 LINE Bot SDK v3：WebhookHandler + MessagingApi + Flex UI（無圖卡）。
+Flex 分析卡 + HTTPS K 線圖（嵌在 Flex hero）。
 """
 
 from __future__ import annotations
@@ -10,10 +10,12 @@ import logging
 import os
 import sys
 import traceback
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 _BOT_DIR = Path(__file__).resolve().parent
 load_dotenv(_BOT_DIR / ".env")
@@ -32,8 +34,8 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-from bot_core import BotReply, handle_query
-from ui import default_quick_reply, to_flex_message
+from bot_core import BotReply, handle_query, schedule_daily_warm
+from ui import build_rate_flex, default_quick_reply, to_flex_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +46,9 @@ logger = logging.getLogger(__name__)
 LINE_TEXT_MAX_LEN = 5000
 
 app = Flask(__name__)
+
+IMAGE_DIR = _BOT_DIR / "static" / "charts"
+IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 LINE_CHANNEL_ACCESS_TOKEN = (os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or "").strip()
 LINE_CHANNEL_SECRET = (os.getenv("LINE_CHANNEL_SECRET") or "").strip()
@@ -63,11 +68,29 @@ SERVER_BASE_URL = (
     or "http://localhost:8080"
 ).rstrip("/")
 
+# 啟動時觸發當日預熱
+try:
+    schedule_daily_warm()
+except Exception:
+    logger.exception("啟動預熱失敗")
+
 
 def _truncate_text(text: str) -> str:
     if len(text) <= LINE_TEXT_MAX_LEN:
         return text
     return text[: LINE_TEXT_MAX_LEN - 20] + "\n…(內容過長已截斷)"
+
+
+def save_chart(image_bytes: bytes, currency: str = "chart") -> str:
+    filename = (
+        f"{currency}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}.png"
+    )
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise ValueError("invalid filename")
+    path = IMAGE_DIR / filename
+    with open(path, "wb") as f:
+        f.write(image_bytes)
+    return f"{SERVER_BASE_URL}/static/charts/{filename}"
 
 
 def _reply(reply_token: str, messages: list) -> None:
@@ -79,17 +102,43 @@ def _reply(reply_token: str, messages: list) -> None:
 
 
 def _build_messages(reply: BotReply) -> list:
-    """只送 Flex 分析卡（含 Quick Reply）。"""
-    if reply.flex is not None:
-        return [
-            to_flex_message(reply.flex, reply.alt_text or "FOREX DESK", quick_reply=True)
-        ]
+    """Flex 卡；若有 K 線且為 HTTPS，嵌成 hero。"""
+    flex = reply.flex
+
+    if reply.chart_bytes and reply._rate_result is not None:
+        try:
+            chart_url = save_chart(
+                reply.chart_bytes,
+                currency=reply._rate_result["rate"]["currency"],
+            )
+            logger.info("K 線已保存: %s", chart_url)
+            if chart_url.startswith("https://"):
+                flex = build_rate_flex(
+                    reply._rate_result,
+                    reply._currency_name or "",
+                    chart_url=chart_url,
+                )
+            else:
+                logger.info("非 HTTPS，Flex 不嵌入 K 線（LINE 要求 https 圖）")
+        except Exception:
+            logger.exception("掛載 K 線失敗")
+
+    if flex is not None:
+        return [to_flex_message(flex, reply.alt_text or "FOREX DESK", quick_reply=True)]
     return [
         TextMessage(
             text=_truncate_text(reply.text_fallback or "（無內容）"),
             quick_reply=default_quick_reply(),
         )
     ]
+
+
+@app.route("/static/charts/<path:filename>")
+def serve_chart(filename: str):
+    safe_name = Path(filename).name
+    if safe_name != filename or ".." in filename:
+        return jsonify({"error": "invalid filename"}), 400
+    return send_from_directory(IMAGE_DIR, safe_name)
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -100,18 +149,11 @@ def handle_message(event: MessageEvent) -> None:
 
         reply = handle_query(user_text)
         if not isinstance(reply, BotReply):
-            if isinstance(reply, tuple):
-                reply = BotReply(
-                    alt_text=str(reply[0])[:40],
-                    flex=None,
-                    text_fallback=str(reply[0]),
-                )
-            else:
-                reply = BotReply(
-                    alt_text="訊息",
-                    flex=None,
-                    text_fallback=str(reply),
-                )
+            reply = BotReply(
+                alt_text="訊息",
+                flex=None,
+                text_fallback=str(reply),
+            )
 
         messages = _build_messages(reply)
         _reply(event.reply_token, messages)
@@ -159,10 +201,11 @@ def health():
         {
             "status": "healthy",
             "service": "forex-line-bot",
-            "ui": "flex-only",
+            "ui": "flex-kline",
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
             "server_base_url": SERVER_BASE_URL,
+            "charts_dir": str(IMAGE_DIR),
         }
     )
 
@@ -196,17 +239,33 @@ def test():
     text = data["text"]
     try:
         reply = handle_query(text)
+        chart_url = None
+        flex = reply.flex
+        if reply.chart_bytes and reply._rate_result is not None:
+            chart_url = save_chart(
+                reply.chart_bytes,
+                currency=reply._rate_result["rate"]["currency"],
+            )
+            if chart_url.startswith("https://") or True:
+                # 本機測試也重建 flex（即使 http）方便看結構
+                flex = build_rate_flex(
+                    reply._rate_result,
+                    reply._currency_name or "",
+                    chart_url=chart_url if chart_url.startswith("https://") else None,
+                )
+
         flex_dict = None
-        if reply.flex is not None:
-            flex_dict = to_flex_message(reply.flex, reply.alt_text).to_dict()
+        if flex is not None:
+            flex_dict = to_flex_message(flex, reply.alt_text).to_dict()
 
         return jsonify(
             {
                 "original": text,
                 "alt_text": reply.alt_text,
                 "reply": reply.text_fallback,
-                "has_flex": reply.flex is not None,
-                "has_image": False,
+                "has_flex": flex is not None,
+                "has_chart": reply.chart_bytes is not None,
+                "chart_url": chart_url,
                 "flex": flex_dict,
                 "success": True,
             }

@@ -15,6 +15,7 @@ from linebot.v3.messaging import (
     FlexBubbleStyles,
     FlexButton,
     FlexCarousel,
+    FlexImage,
     FlexMessage,
     FlexSeparator,
     FlexText,
@@ -41,12 +42,20 @@ DISCLAIMER = "資料僅供參考，不構成投資建議"
 
 
 def default_quick_reply() -> QuickReply:
+    """LINE Quick Reply 最多 13 個。"""
     return QuickReply(
         items=[
             QuickReplyItem(action=MessageAction(label="美元", text="USD")),
             QuickReplyItem(action=MessageAction(label="日圓", text="JPY")),
             QuickReplyItem(action=MessageAction(label="歐元", text="EUR")),
             QuickReplyItem(action=MessageAction(label="英鎊", text="GBP")),
+            QuickReplyItem(action=MessageAction(label="澳幣", text="AUD")),
+            QuickReplyItem(action=MessageAction(label="加幣", text="CAD")),
+            QuickReplyItem(action=MessageAction(label="瑞郎", text="CHF")),
+            QuickReplyItem(action=MessageAction(label="人民幣", text="CNY")),
+            QuickReplyItem(action=MessageAction(label="港幣", text="HKD")),
+            QuickReplyItem(action=MessageAction(label="新幣", text="SGD")),
+            QuickReplyItem(action=MessageAction(label="紐幣", text="NZD")),
             QuickReplyItem(action=MessageAction(label="市場速覽", text="匯率")),
             QuickReplyItem(action=MessageAction(label="使用說明", text="說明")),
         ]
@@ -127,8 +136,12 @@ def _styles() -> FlexBubbleStyles:
     )
 
 
-def build_rate_flex(result: dict, currency_name: str) -> FlexBubble:
-    """單一幣別分析卡。"""
+def build_rate_flex(
+    result: dict,
+    currency_name: str,
+    chart_url: Optional[str] = None,
+) -> FlexBubble:
+    """單一幣別分析卡（可選 HTTPS K 線圖）。"""
     r = result["rate"]
     t = result["tech"]
     code = r["currency"]
@@ -188,6 +201,15 @@ def build_rate_flex(result: dict, currency_name: str) -> FlexBubble:
         FlexText(text=DISCLAIMER, size="xxs", color=ACCENT_SOFT, wrap=True, margin="lg")
     )
 
+    hero = None
+    if chart_url and chart_url.startswith("https://"):
+        hero = FlexImage(
+            url=chart_url,
+            size="full",
+            aspect_ratio="20:9",
+            aspect_mode="cover",
+        )
+
     return FlexBubble(
         size="mega",
         styles=_styles(),
@@ -204,12 +226,13 @@ def build_rate_flex(result: dict, currency_name: str) -> FlexBubble:
                     weight="bold",
                 ),
                 FlexText(
-                    text=f"{currency_name} · {r.get('date', '')}",
+                    text=f"{currency_name} · {r.get('date', '')} · 日K",
                     size="xs",
                     color=ACCENT_SOFT,
                 ),
             ],
         ),
+        hero=hero,
         body=FlexBox(
             layout="vertical",
             spacing="sm",
@@ -341,7 +364,16 @@ def build_error_flex(title: str, detail: str) -> FlexBubble:
 
 def build_hint_carousel() -> FlexCarousel:
     """歡迎／未知指令時的快捷幣別輪播。"""
-    codes = [("USD", "美元"), ("JPY", "日圓"), ("EUR", "歐元"), ("GBP", "英鎊")]
+    codes = [
+        ("USD", "美元"),
+        ("JPY", "日圓"),
+        ("EUR", "歐元"),
+        ("GBP", "英鎊"),
+        ("AUD", "澳幣"),
+        ("CNY", "人民幣"),
+        ("HKD", "港幣"),
+        ("SGD", "新幣"),
+    ]
     bubbles = []
     for code, name in codes:
         bubbles.append(
@@ -349,7 +381,9 @@ def build_hint_carousel() -> FlexCarousel:
                 size="nano",
                 styles=FlexBubbleStyles(
                     body=FlexBlockStyle(background_color=PAPER),
-                    footer=FlexBlockStyle(background_color=PAPER, separator=True, separator_color=LINE),
+                    footer=FlexBlockStyle(
+                        background_color=PAPER, separator=True, separator_color=LINE
+                    ),
                 ),
                 body=FlexBox(
                     layout="vertical",

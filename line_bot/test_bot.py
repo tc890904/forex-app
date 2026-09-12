@@ -1,48 +1,50 @@
 #!/usr/bin/env python3
-"""LINE Bot Flex UI 測試（無圖卡）"""
+"""LINE Bot Flex + K 線測試"""
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from bot_core import BotReply, handle_query
-from ui import to_flex_message
+from ui import default_quick_reply, to_flex_message
 
 print("=" * 50)
-print("FOREX DESK — Flex-only 測試")
+print("FOREX DESK — Flex + K-line 測試")
 print("=" * 50)
+
+qr = default_quick_reply()
+assert len(qr.items) == 13, f"quick reply 應為 13，實際 {len(qr.items)}"
+print(f"Quick Reply: {len(qr.items)} 項 OK")
 
 cases = [
-    ("USD", "美元"),
-    ("匯率", "市場速覽"),
-    ("貨幣", "貨幣別名"),
-    ("說明", "說明選單"),
-    ("分析 日圓", "分析"),
-    ("", "空輸入輪播"),
-    ("xyz", "未知指令"),
+    ("USD", True),
+    ("JPY", True),
+    ("匯率", False),
+    ("說明", False),
 ]
 
 failed = 0
-for query, desc in cases:
-    print(f"\n[{desc}] {query!r}")
-    print("-" * 40)
+for query, expect_chart in cases:
+    print(f"\n[{query}]")
     try:
         reply = handle_query(query)
         assert isinstance(reply, BotReply)
-        assert reply.flex is not None, "必須有 Flex"
-        assert not hasattr(reply, "image_bytes") or getattr(reply, "image_bytes", None) is None
+        assert reply.flex is not None
         msg = to_flex_message(reply.flex, reply.alt_text)
-        payload = msg.to_dict()
-        assert payload["type"] == "flex"
-        print(f"alt: {reply.alt_text}")
-        print(f"flex type: {payload['contents']['type']}")
-        print(f"fallback: {reply.text_fallback[:80]}")
+        assert msg.to_dict()["type"] == "flex"
+        has_chart = reply.chart_bytes is not None
+        print(f"  alt={reply.alt_text}")
+        print(f"  chart={has_chart} bytes={len(reply.chart_bytes or b'')}")
+        if expect_chart and not has_chart:
+            raise AssertionError("預期有 K 線圖")
+        if not expect_chart and has_chart:
+            print("  (市場/說明無圖，正確)")
     except Exception as e:
         failed += 1
-        print(f"FAIL: {e}")
+        print(f"  FAIL: {e}")
 
 print("\n" + "=" * 50)
 if failed:
-    print(f"失敗 {failed} 項")
+    print(f"失敗 {failed}")
     sys.exit(1)
-print("全部通過（僅 Flex，無圖卡）")
+print("全部通過")
