@@ -7,3 +7,6 @@ gunicorn>=21.2.0
 pandas>=2.0.0
 numpy>=1.24.0
 Pillow>=10.0.0
+
+# Telegram Bot 支援
+python-telegram-bot>=20.0,<21

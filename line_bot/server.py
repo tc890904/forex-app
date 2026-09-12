@@ -350,6 +350,86 @@ def test():
         return jsonify({"error": str(e), "success": False}), 500
 
 
+# ============================================================
+# Telegram Webhook Support
+# ============================================================
+TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/webhook/telegram")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+TG_MAX_LEN = 4000
+
+if TELEGRAM_BOT_TOKEN:
+    logger.info("Telegram webhook 已啟用 (token: %s...)", TELEGRAM_BOT_TOKEN[:8])
+else:
+    logger.warning("TELEGRAM_BOT_TOKEN 未設定 — Telegram webhook 將無法運作")
+
+
+def _tg_truncate(text: str) -> str:
+    if len(text) <= TG_MAX_LEN:
+        return text
+    return text[: TG_MAX_LEN - 30] + "\n\n…（已截斷）"
+
+
+@app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
+def telegram_webhook():
+    """Telegram webhook — 文字 + K 線圖片。"""
+    if not request.is_json:
+        return jsonify({"error": "expected json"}), 400
+
+    update_dict = request.get_json(silent=True)
+    if not update_dict:
+        return jsonify({"error": "empty body"}), 400
+
+    try:
+        message = update_dict.get("message", {})
+        chat = message.get("chat", {})
+        user = message.get("from", {})
+        text = message.get("text", "").strip()
+        update_id = update_dict.get("update_id")
+
+        if not text:
+            return jsonify({"status": "skipped"}), 200
+
+        user_id = str(user.get("id", "unknown"))
+        chat_id = str(chat.get("id", "unknown"))
+
+        logger.info("Telegram 收到: %s (user=%s, chat=%s)", text, user_id, chat_id)
+
+        reply = handle_query(text, user_id=user_id)
+        if not isinstance(reply, BotReply):
+            reply = BotReply(
+                alt_text=text,
+                flex=None,
+                text_fallback=str(reply),
+            )
+
+        text_out = _tg_truncate(reply.text_fallback or reply.alt_text or "(無內容)")
+
+        result = {"update_id": update_id, "chat_id": chat_id, "text": text_out}
+
+        # 若有 K 線圖，編碼為 base64（前端可 decode 發送）
+        if reply.chart_bytes:
+            import base64
+            result["photo"] = base64.b64encode(reply.chart_bytes).decode("utf-8")
+            result["photo_caption"] = reply.alt_text or ""
+
+        return jsonify(result), 200
+
+    except Exception as exc:
+        logger.exception("Telegram webhook 處理失敗")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/telegram/health", methods=["GET"])
+def telegram_health():
+    ready = bool(TELEGRAM_BOT_TOKEN)
+    return jsonify({
+        "service": "forex-telegram-bot",
+        "ready": ready,
+        "token_set": bool(TELEGRAM_BOT_TOKEN),
+        "webhook_path": TELEGRAM_WEBHOOK_PATH,
+    }), (200 if ready else 503)
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False)
