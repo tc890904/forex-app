@@ -5,11 +5,16 @@ LINE Bot Webhook Server
 """
 
 import os
+import sys
 import logging
+from pathlib import Path
 from dotenv import load_dotenv
 
 # 載入 .env 環境變數
 load_dotenv()
+
+# 添加當前目錄到 Python 路徑（Render 部署需要）
+sys.path.insert(0, str(Path(__file__).parent))
 
 from flask import Flask, request, jsonify
 from linebot import LineBotApi, WebhookHandler
