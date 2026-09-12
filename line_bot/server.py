@@ -1,7 +1,7 @@
 """
 LINE Bot Webhook Server
 
-純 LINE Bot SDK v3：WebhookHandler + MessagingApi。
+純 LINE Bot SDK v3：WebhookHandler + MessagingApi + Flex UI。
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 
-# 優先載入 line_bot/.env，再載入 cwd .env（本機開發用）
 _BOT_DIR = Path(__file__).resolve().parent
 load_dotenv(_BOT_DIR / ".env")
 load_dotenv()
@@ -30,16 +29,14 @@ from linebot.v3.messaging import (
     ApiClient,
     Configuration,
     ImageMessage,
-    MessageAction,
     MessagingApi,
-    QuickReply,
-    QuickReplyItem,
     ReplyMessageRequest,
     TextMessage,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-from bot_core import handle_query
+from bot_core import BotReply, handle_query
+from ui import default_quick_reply, to_flex_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,7 +44,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# LINE 文字訊息上限
 LINE_TEXT_MAX_LEN = 5000
 
 app = Flask(__name__, static_folder="static")
@@ -67,17 +63,6 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-QUICK_REPLY = QuickReply(
-    items=[
-        QuickReplyItem(action=MessageAction(label="USD", text="USD")),
-        QuickReplyItem(action=MessageAction(label="JPY", text="JPY")),
-        QuickReplyItem(action=MessageAction(label="EUR", text="EUR")),
-        QuickReplyItem(action=MessageAction(label="GBP", text="GBP")),
-        QuickReplyItem(action=MessageAction(label="匯率", text="匯率")),
-        QuickReplyItem(action=MessageAction(label="說明", text="說明")),
-    ]
-)
-
 SERVER_BASE_URL = (
     os.getenv("SERVER_BASE_URL")
     or os.getenv("RENDER_EXTERNAL_URL")
@@ -92,22 +77,17 @@ def _truncate_text(text: str) -> str:
 
 
 def save_image_to_disk(image_bytes: bytes, filename: str | None = None) -> str:
-    """將圖片寫入 static/images，回傳對外可存取的 HTTPS/HTTP URL。"""
     if filename is None:
         filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
-
     if "/" in filename or "\\" in filename or ".." in filename:
         raise ValueError("invalid image filename")
-
     filepath = IMAGE_DIR / filename
     with open(filepath, "wb") as f:
         f.write(image_bytes)
-
     return f"{SERVER_BASE_URL}/static/images/{filename}"
 
 
 def _reply(reply_token: str, messages: list) -> None:
-    """以 MessagingApi v3 回覆訊息。"""
     with ApiClient(configuration) as api_client:
         messaging_api = MessagingApi(api_client)
         messaging_api.reply_message(
@@ -115,9 +95,43 @@ def _reply(reply_token: str, messages: list) -> None:
         )
 
 
+def _build_messages(reply: BotReply) -> list:
+    """Flex 為主；HTTPS 時附加圖卡；最後一則帶 Quick Reply。"""
+    messages: list = []
+
+    if reply.image_bytes:
+        try:
+            image_url = save_image_to_disk(reply.image_bytes)
+            logger.info("圖片已保存: %s", image_url)
+            if image_url.startswith("https://"):
+                messages.append(
+                    ImageMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url,
+                    )
+                )
+            else:
+                logger.info("本機非 HTTPS，略過 ImageMessage（Flex 仍會送出）")
+        except Exception:
+            logger.exception("保存圖片時出錯")
+
+    if reply.flex is not None:
+        messages.append(
+            to_flex_message(reply.flex, reply.alt_text or "FOREX DESK", quick_reply=True)
+        )
+    else:
+        messages.append(
+            TextMessage(
+                text=_truncate_text(reply.text_fallback or "（無內容）"),
+                quick_reply=default_quick_reply(),
+            )
+        )
+
+    return messages
+
+
 @app.route("/static/images/<path:filename>")
 def serve_image(filename: str):
-    """提供圖卡檔案；阻擋路徑穿越。"""
     safe_name = Path(filename).name
     if safe_name != filename or ".." in filename:
         return jsonify({"error": "invalid filename"}), 400
@@ -126,53 +140,42 @@ def serve_image(filename: str):
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event: MessageEvent) -> None:
-    """處理文字訊息並回覆。"""
     try:
         user_text = event.message.text
         logger.info("收到訊息: %s", user_text)
 
-        result = handle_query(user_text)
-        if isinstance(result, tuple):
-            reply_text = result[0]
-            image_data = result[1] if len(result) > 1 else None
-        else:
-            reply_text = str(result)
-            image_data = None
+        reply = handle_query(user_text)
+        if not isinstance(reply, BotReply):
+            # 向後相容：舊 tuple
+            if isinstance(reply, tuple):
+                reply = BotReply(
+                    alt_text=str(reply[0])[:40],
+                    flex=None,
+                    text_fallback=str(reply[0]),
+                    image_bytes=reply[1] if len(reply) > 1 else None,
+                )
+            else:
+                reply = BotReply(
+                    alt_text="訊息",
+                    flex=None,
+                    text_fallback=str(reply),
+                )
 
-        reply_text = _truncate_text(reply_text or "（無內容）")
-        messages: list = []
-
-        if image_data:
-            try:
-                image_url = save_image_to_disk(image_data)
-                logger.info("圖片已保存: %s", image_url)
-                # LINE 要求圖片 URL 必須是 HTTPS 公開網址
-                if image_url.startswith("https://"):
-                    messages.append(
-                        ImageMessage(
-                            original_content_url=image_url,
-                            preview_image_url=image_url,
-                        )
-                    )
-                else:
-                    logger.warning(
-                        "略過圖片（非 HTTPS URL，LINE 無法抓取）: %s", image_url
-                    )
-            except Exception:
-                logger.exception("保存圖片時出錯")
-
-        # QuickReply 掛在最後一則文字訊息
-        messages.append(TextMessage(text=reply_text, quick_reply=QUICK_REPLY))
-
+        messages = _build_messages(reply)
         _reply(event.reply_token, messages)
-        logger.info("已回覆成功")
+        logger.info("已回覆成功（%d 則）", len(messages))
 
     except Exception as exc:
         logger.exception("處理訊息時出錯: %s", exc)
         try:
             _reply(
                 event.reply_token,
-                [TextMessage(text=f"⚠️ 暫時無法處理，請稍後再試。")],
+                [
+                    TextMessage(
+                        text="暫時無法處理，請稍後再試。",
+                        quick_reply=default_quick_reply(),
+                    )
+                ],
             )
         except Exception:
             logger.exception("錯誤回覆也失敗")
@@ -180,7 +183,6 @@ def handle_message(event: MessageEvent) -> None:
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """LINE webhook endpoint。"""
     signature = request.headers.get("X-Line-Signature", "")
     if not signature:
         logger.error("Missing X-Line-Signature header")
@@ -194,7 +196,6 @@ def webhook():
         return jsonify({"error": "Invalid signature"}), 400
     except Exception as e:
         logger.exception("Webhook processing error: %s", e)
-        # 仍回 200，避免 LINE 無限重試；細節已寫入 log
         return jsonify({"status": "ok", "note": "handler error logged"}), 200
 
     return jsonify({"status": "ok"}), 200
@@ -202,11 +203,11 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """健康檢查（Render / 冷啟動喚醒用）。"""
     return jsonify(
         {
             "status": "healthy",
             "service": "forex-line-bot",
+            "ui": "flex-v1",
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
             "server_base_url": SERVER_BASE_URL,
@@ -217,7 +218,6 @@ def health():
 
 @app.route("/", methods=["GET"])
 def index():
-    """根路徑，方便確認服務存活。"""
     return jsonify(
         {
             "service": "forex-line-bot",
@@ -228,7 +228,6 @@ def index():
 
 
 def _test_endpoint_enabled() -> bool:
-    """Render 上預設關閉；本機或明確開啟時可用。"""
     if os.getenv("ENABLE_TEST_ENDPOINT", "0") == "1":
         return True
     return not bool(os.getenv("RENDER"))
@@ -236,7 +235,6 @@ def _test_endpoint_enabled() -> bool:
 
 @app.route("/test", methods=["POST"])
 def test():
-    """測試 endpoint（Render 預設關閉；設 ENABLE_TEST_ENDPOINT=1 開啟）。"""
     if not _test_endpoint_enabled():
         return jsonify({"error": "disabled"}), 404
 
@@ -246,24 +244,24 @@ def test():
 
     text = data["text"]
     try:
-        result = handle_query(text)
-        if isinstance(result, tuple):
-            reply_text = result[0]
-            image_data = result[1] if len(result) > 1 else None
-        else:
-            reply_text = str(result)
-            image_data = None
-
+        reply = handle_query(text)
         image_url = None
-        if image_data:
-            image_url = save_image_to_disk(image_data)
+        if reply.image_bytes:
+            image_url = save_image_to_disk(reply.image_bytes)
+
+        flex_dict = None
+        if reply.flex is not None:
+            flex_dict = to_flex_message(reply.flex, reply.alt_text).to_dict()
 
         return jsonify(
             {
                 "original": text,
-                "reply": reply_text,
+                "alt_text": reply.alt_text,
+                "reply": reply.text_fallback,
                 "image_url": image_url,
-                "has_image": image_data is not None,
+                "has_image": reply.image_bytes is not None,
+                "has_flex": reply.flex is not None,
+                "flex": flex_dict,
                 "success": True,
             }
         )
@@ -284,5 +282,4 @@ if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "0") == "1"
     logger.info("啟動 LINE Bot Server 在 port %s (debug=%s)", port, debug)
     logger.info("Webhook URL: %s/webhook", SERVER_BASE_URL)
-    logger.info("Health Check: %s/health", SERVER_BASE_URL)
     app.run(host="0.0.0.0", port=port, debug=debug)

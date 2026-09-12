@@ -1,21 +1,28 @@
 """
 LINE Bot — 外匯行情查詢機器人
 
-支援：即時匯率、技術指標、圖卡、貨幣速覽、快速指令。
+回傳結構化 BotReply（Flex UI + 可選圖卡）。
 """
 
 from __future__ import annotations
 
-import io
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 import requests
-from PIL import Image, ImageDraw, ImageFont
+
+from ui import (
+    build_error_flex,
+    build_help_flex,
+    build_hint_carousel,
+    build_market_flex,
+    build_rate_flex,
+    generate_rate_card_image,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,28 +70,6 @@ CURRENCY_ALIASES: dict[str, str] = {
     "台幣": "TWD",
 }
 
-CURRENCY_ICONS = {
-    "USD": "USD",
-    "JPY": "JPY",
-    "EUR": "EUR",
-    "GBP": "GBP",
-    "AUD": "AUD",
-    "CAD": "CAD",
-    "CHF": "CHF",
-    "CNY": "CNY",
-    "HKD": "HKD",
-    "SGD": "SGD",
-    "NZD": "NZD",
-    "SEK": "SEK",
-    "ZAR": "ZAR",
-    "THB": "THB",
-    "PHP": "PHP",
-    "IDR": "IDR",
-    "KRW": "KRW",
-    "VND": "VND",
-    "MYR": "MYR",
-}
-
 CURRENCY_NAMES = {
     "USD": "美元",
     "JPY": "日圓",
@@ -124,9 +109,18 @@ FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_DATASET = "TaiwanExchangeRate"
 API_TIMEOUT = 8
 
-# 簡易記憶體快取，降低同一請求內重複打 API
 _CACHE: dict[str, tuple[float, list[dict]]] = {}
 _CACHE_TTL_SEC = 60.0
+
+
+@dataclass
+class BotReply:
+    """統一回覆結構：Flex 為主、文字備援、圖卡可選。"""
+
+    alt_text: str
+    flex: Any
+    text_fallback: str
+    image_bytes: Optional[bytes] = None
 
 
 def _cache_get(key: str) -> Optional[list[dict]]:
@@ -145,7 +139,6 @@ def _cache_set(key: str, data: list[dict]) -> None:
 
 
 def _fetch_exchange_data(currency_code: str, days: int = 90) -> list[dict]:
-    """從 FinMind 取得歷史匯率資料（含短快取）。"""
     cache_key = f"{currency_code}:{days}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -154,14 +147,12 @@ def _fetch_exchange_data(currency_code: str, days: int = 90) -> list[dict]:
     today = datetime.today()
     start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
-
     params = {
         "dataset": FINMIND_DATASET,
         "data_id": currency_code,
         "start_date": start,
         "end_date": end,
     }
-
     try:
         resp = requests.get(FINMIND_API_URL, params=params, timeout=API_TIMEOUT)
         resp.raise_for_status()
@@ -177,25 +168,18 @@ def _fetch_exchange_data(currency_code: str, days: int = 90) -> list[dict]:
 
 
 def resolve_currency(query: str) -> Optional[str]:
-    """解析關鍵字，回傳幣別代碼。"""
     raw = query.strip()
     if not raw:
         return None
-
     q = raw.upper()
     if q in CURRENCY_ALIASES:
         return CURRENCY_ALIASES[q]
-
-    # 精確中文別名（大小寫敏感比對原始字串）
     if raw in CURRENCY_ALIASES:
         return CURRENCY_ALIASES[raw]
-
     lower = raw.lower()
     for alias, code in CURRENCY_ALIASES.items():
         if lower == alias.lower():
             return code
-
-    # 子字串比對（避免過短誤判）
     if len(raw) >= 2:
         for alias, code in CURRENCY_ALIASES.items():
             if lower in alias.lower() or alias.lower() in lower:
@@ -220,15 +204,12 @@ def _records_to_rate(currency_code: str, records: list[dict]) -> Optional[dict]:
 def _records_to_tech(records: list[dict]) -> Optional[dict]:
     if len(records) < 30:
         return None
-
     df = pd.DataFrame(records)
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
-
     close_col = "spot_sell" if "spot_sell" in df.columns else "cash_sell"
     if close_col not in df.columns:
         return None
-
     df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
     df = df.dropna(subset=[close_col])
     if len(df) < 30:
@@ -237,7 +218,6 @@ def _records_to_tech(records: list[dict]) -> Optional[dict]:
     result: dict = {}
     df["MA20"] = df[close_col].rolling(window=20).mean()
     df["MA50"] = df[close_col].rolling(window=50).mean()
-
     last = df.iloc[-1]
     result["close"] = float(last[close_col])
     result["ma20"] = float(last["MA20"]) if pd.notna(last["MA20"]) else None
@@ -258,36 +238,19 @@ def _records_to_tech(records: list[dict]) -> Optional[dict]:
     result["dea"] = float(df["DEA"].iloc[-1]) if pd.notna(df["DEA"].iloc[-1]) else None
 
     prev = df.iloc[-2][close_col] if len(df) >= 2 else None
-    result["change_pct"] = (
-        ((result["close"] - prev) / prev * 100) if prev else None
-    )
+    result["change_pct"] = ((result["close"] - prev) / prev * 100) if prev else None
     return result
 
 
-def get_latest_rate(currency_code: str) -> Optional[dict]:
-    """取得最新匯率。"""
-    records = _fetch_exchange_data(currency_code, days=14)
-    return _records_to_rate(currency_code, records)
-
-
-def calc_technical_indicators(currency_code: str) -> Optional[dict]:
-    """計算技術指標（MA、RSI、MACD）。"""
-    records = _fetch_exchange_data(currency_code, days=120)
-    return _records_to_tech(records)
-
-
 def analyze_currency(currency_code: str) -> dict:
-    """綜合分析單一幣別（只打一次 FinMind）。"""
     records = _fetch_exchange_data(currency_code, days=120)
     rate = _records_to_rate(currency_code, records)
     tech = _records_to_tech(records)
-
     if not rate or not tech:
         return {"error": f"無法取得 {currency_code} 的資料"}
 
     score = 0
     signals: list[str] = []
-
     if tech["ma20"] and tech["ma50"]:
         if tech["ma20"] > tech["ma50"]:
             score += 1
@@ -295,7 +258,6 @@ def analyze_currency(currency_code: str) -> dict:
         else:
             score -= 1
             signals.append("MA 空頭排列")
-
     if tech["rsi"] is not None:
         if tech["rsi"] < 30:
             score += 1
@@ -305,7 +267,6 @@ def analyze_currency(currency_code: str) -> dict:
             signals.append("RSI 超買（可能回落）")
         else:
             signals.append("RSI 中性")
-
     if tech["dif"] is not None and tech["dea"] is not None:
         if tech["dif"] > tech["dea"]:
             score += 1
@@ -325,127 +286,26 @@ def analyze_currency(currency_code: str) -> dict:
     else:
         mood = "中性"
 
-    return {
-        "rate": rate,
-        "tech": tech,
-        "mood": mood,
-        "signals": signals,
-        "score": score,
-    }
+    return {"rate": rate, "tech": tech, "mood": mood, "signals": signals, "score": score}
 
 
-def _load_fonts() -> tuple:
-    """跨平台字體載入（macOS / Linux Render / 預設）。"""
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/Library/Fonts/Arial Unicode.ttf",
-    ]
-    for path in candidates:
-        if Path(path).exists():
-            try:
-                return (
-                    ImageFont.truetype(path, 28),
-                    ImageFont.truetype(path, 56),
-                    ImageFont.truetype(path, 22),
-                    ImageFont.truetype(path, 18),
-                )
-            except OSError:
-                continue
-    default = ImageFont.load_default()
-    return default, default, default, default
-
-
-def generate_rate_card(currency_code: str) -> Optional[bytes]:
-    """生成匯率圖卡圖片。"""
-    result = analyze_currency(currency_code)
+def _rate_text_fallback(result: dict, name: str) -> str:
     if "error" in result:
-        return None
-
+        return result["error"]
     r = result["rate"]
     t = result["tech"]
-
-    width, height = 420, 320
-    img = Image.new("RGB", (width, height), color="#1a1a2e")
-    draw = ImageDraw.Draw(img)
-
-    font_title, font_currency, font_body, font_small = _load_fonts()
-
-    icon = CURRENCY_ICONS.get(currency_code, currency_code)
-    draw.text((25, 25), f"{icon}/TWD", fill="white", font=font_title)
-    draw.text((25, 65), f"Date: {r['date']}", fill="#888888", font=font_small)
-
-    rate_text = f"{r['spot_sell']:.4f}"
-    draw.text((25, 110), rate_text, fill="white", font=font_currency)
-    draw.text((25 + len(rate_text) * 18, 125), "TWD", fill="#888888", font=font_body)
-
-    if t["change_pct"] is not None:
-        change_text = f"{t['change_pct']:+.2f}%"
-        change_color = "#10b981" if t["change_pct"] > 0 else "#ef4444"
-        draw.text((25, 190), change_text, fill=change_color, font=font_body)
-
-    mood_color = (
-        "#10b981"
-        if result["score"] > 0
-        else ("#ef4444" if result["score"] < 0 else "#f59e0b")
+    change = t.get("change_pct")
+    change_s = f"{change:+.2f}%" if change is not None else "—"
+    return (
+        f"{r['currency']} {name}\n"
+        f"即期賣出 {r['spot_sell']:.4f}（{change_s}）\n"
+        f"{result['mood']}\n"
+        f"資料日期 {r['date']}"
     )
-    draw.text((25, 230), result["mood"], fill=mood_color, font=font_body)
-
-    if t["rsi"] is not None:
-        rsi_color = (
-            "#ef4444"
-            if t["rsi"] > 70
-            else ("#10b981" if t["rsi"] < 30 else "#f59e0b")
-        )
-        draw.text((25, 270), f"RSI: {t['rsi']:.1f}", fill=rsi_color, font=font_small)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf.getvalue()
 
 
-def format_rate_message(result: dict) -> str:
-    """格式化匯率訊息。"""
-    if "error" in result:
-        return f"⚠️ {result['error']}"
-
-    r = result["rate"]
-    t = result["tech"]
-
-    lines = [
-        f"💱 {r['currency']} 匯率報價",
-        f"📅 日期：{r['date']}",
-        f"💰 即期賣出：{r['spot_sell']:.4f}",
-        f"💵 現金賣出：{r['cash_sell']:.4f}",
-    ]
-
-    if t["change_pct"] is not None:
-        sign = "+" if t["change_pct"] > 0 else ""
-        lines.append(f"📊 日漲跌幅：{sign}{t['change_pct']:.2f}%")
-
-    lines.append(f"\n{result['mood']}")
-    lines.extend(result["signals"])
-
-    if t["rsi"] is not None:
-        lines.append(f"\n📈 RSI(14)：{t['rsi']:.1f}")
-    if t["ma20"] and t["ma50"]:
-        lines.append(f"📊 MA20：{t['ma20']:.4f} | MA50：{t['ma50']:.4f}")
-    if t["dif"] is not None and t["dea"] is not None:
-        lines.append(f"📉 MACD DIF：{t['dif']:.4f} | DEA：{t['dea']:.4f}")
-
-    lines.append("\n⚠️ 資料僅供參考，不構成投資建議。")
-    return "\n".join(lines)
-
-
-def format_multi_rates(codes: list[str]) -> str:
-    """格式化多幣別匯率比較（並行請求）。"""
-    codes = codes[:10]
+def _collect_market(codes: list[str]) -> dict[str, dict]:
     results: dict[str, dict] = {}
-
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(analyze_currency, code): code for code in codes}
         for fut in as_completed(futures):
@@ -455,66 +315,95 @@ def format_multi_rates(codes: list[str]) -> str:
             except Exception as e:
                 logger.error("分析失敗 [%s]: %s", code, e)
                 results[code] = {"error": str(e)}
-
-    lines = ["💱 主要貨幣匯率速覽\n"]
-    for code in codes:
-        result = results.get(code) or {"error": "無資料"}
-        if "error" not in result:
-            r = result["rate"]
-            lines.append(f"{code}: {r['spot_sell']:.4f}  {result['mood']}")
-        else:
-            lines.append(f"{code}: 暫無資料")
-    lines.append("\n⚠️ 資料僅供參考，不構成投資建議。")
-    return "\n".join(lines)
+    return results
 
 
-def handle_query(text: str) -> tuple[str, Optional[bytes]]:
-    """處理用戶輸入，回傳 (回覆文字, 可選圖片 bytes)。"""
+def _reply_currency(code: str, with_image: bool = True) -> BotReply:
+    name = CURRENCY_NAMES.get(code, code)
+    result = analyze_currency(code)
+    if "error" in result:
+        return BotReply(
+            alt_text=f"{code} 暫無資料",
+            flex=build_error_flex("查無資料", result["error"]),
+            text_fallback=result["error"],
+        )
+    image = generate_rate_card_image(result, name) if with_image else None
+    alt = f"{code} {result['rate']['spot_sell']:.4f} {result['mood']}"
+    return BotReply(
+        alt_text=alt,
+        flex=build_rate_flex(result, name),
+        text_fallback=_rate_text_fallback(result, name),
+        image_bytes=image,
+    )
+
+
+def _reply_market() -> BotReply:
+    results = _collect_market(MAJOR_CURRENCIES)
+    lines = ["市場速覽"]
+    for code in MAJOR_CURRENCIES:
+        r = results.get(code)
+        if r and "error" not in r:
+            lines.append(f"{code} {r['rate']['spot_sell']:.4f}")
+    return BotReply(
+        alt_text="市場速覽 · 主要貨幣匯率",
+        flex=build_market_flex(results, MAJOR_CURRENCIES),
+        text_fallback="\n".join(lines),
+    )
+
+
+def handle_query(text: str) -> BotReply:
+    """處理用戶輸入，回傳 BotReply。"""
     text = (text or "").strip()
+
     if not text:
-        return "請輸入幣別或「說明」查看指令。", None
+        return BotReply(
+            alt_text="請選擇要查詢的貨幣",
+            flex=build_hint_carousel(),
+            text_fallback="請輸入幣別或「說明」查看指令。",
+        )
 
-    if text.lower() in ["/help", "說明", "幫助", "help"]:
-        help_msg = """📋 可使用的指令：
+    if text.lower() in ["/help", "說明", "幫助", "help", "選單", "menu"]:
+        return BotReply(
+            alt_text="FOREX DESK 使用說明",
+            flex=build_help_flex(),
+            text_fallback="輸入幣別代碼或中文名稱查詢匯率。輸入「匯率」查看市場速覽。",
+        )
 
-💰 匯率查詢：
-  • 幣別代碼（USD、JPY）
-  • 中文名稱（美元、日圓）
+    if text.lower() in ["/rates", "匯率", "匯率報價", "市場", "速覽"]:
+        return _reply_market()
 
-📊 技術分析：
-  • 「分析 美元」→ RSI / MACD / MA
-
-📈 市場概覽：
-  • 「匯率」或 /rates
-  • 「最強」查看主要貨幣
-
-❓ 「說明」顯示此訊息
-
-⚠️ 資料僅供參考，不構成投資建議。"""
-        return help_msg, None
-
-    if text.lower() in ["/rates", "匯率", "匯率報價"]:
-        return format_multi_rates(MAJOR_CURRENCIES), None
+    if "strongest" in text.lower() or "最強" in text:
+        return _reply_market()
 
     if text.lower().startswith("分析") or text.lower().startswith("analyze"):
         query = text[2:].strip() if text.lower().startswith("分析") else text[7:].strip()
         code = resolve_currency(query)
-        if code:
-            # 圖卡會再呼叫 analyze；快取可避免重複打 API
-            result = analyze_currency(code)
-            card = generate_rate_card(code)
-            return format_rate_message(result), card
-        return f"⚠️ 無法識別幣別：{query}\n請輸入正確的幣別代碼或中文名稱", None
+        if code and code != "TWD":
+            return _reply_currency(code, with_image=True)
+        return BotReply(
+            alt_text="無法識別幣別",
+            flex=build_error_flex("無法識別", "請改輸入代碼，例如：分析 USD"),
+            text_fallback=f"無法識別幣別：{query}",
+        )
 
     code = resolve_currency(text)
     if code:
         if code == "TWD":
-            return "台幣為基準貨幣（TWD），請查詢其他幣別對 TWD 的匯率。", None
-        result = analyze_currency(code)
-        card = generate_rate_card(code)
-        return format_rate_message(result), card
+            return BotReply(
+                alt_text="台幣為基準貨幣",
+                flex=build_error_flex(
+                    "基準貨幣",
+                    "台幣（TWD）為報價基準，請查詢其他幣別對 TWD 的匯率。",
+                ),
+                text_fallback="台幣為基準貨幣，請查詢其他幣別。",
+            )
+        return _reply_currency(code, with_image=True)
 
-    if "strongest" in text.lower() or "最強" in text:
-        return format_multi_rates(MAJOR_CURRENCIES), None
-
-    return f"⚠️ 無法識別指令：{text}\n請輸入「說明」查看可用指令", None
+    return BotReply(
+        alt_text="無法識別指令",
+        flex=build_error_flex(
+            "無法識別",
+            f'找不到「{text}」。可點下方按鈕，或輸入 USD、美元、匯率、說明。',
+        ),
+        text_fallback=f"無法識別：{text}。請輸入「說明」。",
+    )
