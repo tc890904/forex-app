@@ -1,0 +1,114 @@
+"""
+LINE Bot Webhook Server
+
+使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
+"""
+
+import os
+import logging
+from dotenv import load_dotenv
+
+# 載入 .env 環境變數
+load_dotenv()
+
+from flask import Flask, request, jsonify
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import (
+    MessageEvent, TextMessage, TextSendMessage,
+    ImageSendMessage, QuickReply, QuickReplyButton,
+)
+
+from bot_core import handle_query
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# LINE Bot 設定（從環境變數讀取）
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    """處理文字訊息。"""
+    user_text = event.message.text
+    logger.info(f"收到訊息: {user_text}")
+
+    # 處理查詢
+    reply_text = handle_query(user_text)
+
+    # 建立快速回覆按鈕
+    quick_reply = QuickReply(
+        items=[
+            QuickReplyButton(
+                action={"label": "說明", "action": {"type": "text", "text": "說明"}},
+            ),
+            QuickReplyButton(
+                action={"label": "匯率", "action": {"type": "text", "text": "匯率"}},
+            ),
+            QuickReplyButton(
+                action={"label": "USD", "action": {"type": "text", "text": "USD"}},
+            ),
+            QuickReplyButton(
+                action={"label": "JPY", "action": {"type": "text", "text": "JPY"}},
+            ),
+        ]
+    )
+
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text, quickReply=quick_reply)
+    )
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """LINE webhook endpoint。"""
+    signature = request.headers["X-Line-Signature"]
+
+    # 驗證簽章
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        logger.error("Invalid signature")
+        return jsonify({"error": "Invalid signature"}), 400
+
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """健康檢查 endpoint。"""
+    return jsonify({"status": "healthy", "service": "forex-line-bot"})
+
+
+@app.route("/test", methods=["POST"])
+def test():
+    """測試 endpoint（不需簽章）。"""
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Missing 'text' field"}), 400
+
+    text = data["text"]
+    reply_text = handle_query(text)
+
+    return jsonify({
+        "original": text,
+        "reply": reply_text,
+    })
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8080))
+    logger.info(f"啟動 LINE Bot Server 在 port {port}")
+    logger.info(f"Webhook URL: http://localhost:{port}/webhook")
+    logger.info(f"Health Check: http://localhost:{port}/health")
+    logger.info(f"Test API:     POST http://localhost:{port}/test")
+    app.run(host="0.0.0.0", port=port, debug=True)
