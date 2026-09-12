@@ -1,16 +1,18 @@
-build:
-  steps:
-    - pip install streamlit plotly pandas numpy requests
-
 services:
   - type: web
-    name: forex-app
-    env: python
-    region: oregon
+    name: forex-line-bot
+    runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.headless true
-
-envVars:
-  - key: STREAMLIT_SERVER_PORT
-    value: 8501
+    region: oregon
+    buildCommand: pip install -r line_bot/requirements.txt
+    startCommand: gunicorn line_bot.server:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 4
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: SERVER_BASE_URL
+        sync: false

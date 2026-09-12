@@ -1,4 +1,5 @@
-line-bot-sdk>=2.1.0
+# LINE Bot 依賴（Render / 本機）
+line-bot-sdk>=3.5.0,<4
 flask>=3.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0

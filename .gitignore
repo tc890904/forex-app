@@ -28,6 +28,10 @@ ENV/
 .env.local
 .env.*.local
 
+# LINE bot generated rate cards
+line_bot/static/images/*.png
+!line_bot/static/images/.gitkeep
+
 # IDE
 .vscode/
 .idea/

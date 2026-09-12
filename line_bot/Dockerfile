@@ -2,17 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 複製需求文件
-COPY requirements.txt .
+# 以 repo 根目錄為 build context 時：
+# docker build -f line_bot/Dockerfile .
+COPY line_bot/requirements.txt /app/line_bot/requirements.txt
+RUN pip install --no-cache-dir -r /app/line_bot/requirements.txt
 
-# 安裝依賴
-RUN pip install --no-cache-dir -r requirements.txt
+COPY line_bot /app/line_bot
 
-# 複製應用代碼
-COPY . .
-
-# 暴露端口
+ENV PORT=8080
 EXPOSE 8080
 
-# 啟動命令（使用 gunicorn 生產環境）
-CMD ["gunicorn", "server:app", "--bind", "0.0.0.0:8080", "--timeout", "120"]
+CMD ["gunicorn", "line_bot.server:app", "--bind", "0.0.0.0:8080", "--timeout", "120", "--workers", "1", "--threads", "4"]

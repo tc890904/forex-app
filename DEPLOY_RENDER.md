@@ -1,71 +1,63 @@
-# LINE Bot 外匯行情機器人
+# LINE Bot 外匯行情機器人 - Render 部署指南
 
-## 快速部署到 Render (免費)
-
-### 步驟 1: 推送代碼到 GitHub
+## 1. 推送到 GitHub
 
 ```bash
-cd /Users/a000/Downloads/forex_app
-git init
+cd /path/to/forex_app
 git add .
-git commit -m "Initial commit: Forex App + LINE Bot"
-git branch -M main
-
-# 在 GitHub 建立新儲存庫，然後執行：
-git remote add origin https://github.com/YOUR_USERNAME/forex-app.git
-git push -u origin main
+git commit -m "Fix LINE Bot v3 reply and Render config"
+git push
 ```
 
-### 步驟 2: 部署到 Render
+## 2. 部署到 Render
 
-1. 註冊 Render: https://render.com
-2. 點擊 **New** → **Web Service**
-3. 選擇剛才建立的 GitHub 儲存庫
-4. 使用以下設定：
-   - **Name**: `forex-line-bot`
-   - **Environment**: `Python 3`
-   - **Build Command**: `pip install -r line_bot/requirements.txt`
-   - **Start Command**: `gunicorn line_bot.server:app --bind 0.0.0.0:$PORT`
-   - **Instance Type**: `Free`
-5. 新增環境變數：
-   - `LINE_CHANNEL_ACCESS_TOKEN` = `t/OS62lcL0egB4KgzOiqZR2N5ac0JTfWVWKQVGHQwG5sVOPSyDmemNyhFzaVf++9Kkk3Yefn3mMto6gaq4jumE1xYdSGxNaiN+R1CXDVEq73YxNB6cy31yRDenfgSon4yKKTmUMghk70fLnD0lSnFgdB04t89/1O/w1cDnyilFU=`
-   - `LINE_CHANNEL_SECRET` = `3e97eecf5087595874c51eca8fc4b4eb`
-6. 點擊 **Create Web Service**
+1. 開啟 https://render.com → **New** → **Web Service**
+2. 連接 GitHub repository
+3. 建議設定：
 
-### 步驟 3: 設定 LINE Webhook
+| 設定 | 值 |
+|------|-----|
+| Name | `forex-line-bot` |
+| Runtime | `Python 3` |
+| Build Command | `pip install -r line_bot/requirements.txt` |
+| Start Command | `gunicorn line_bot.server:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 4` |
+| Health Check Path | `/health` |
 
-部署完成後，Render 會提供一個 URL，例如：
-```
-https://forex-line-bot.onrender.com
-```
+也可直接使用 repo 根目錄的 `render.yaml`（Blueprint）。
 
-在 LINE Developers Console 設定：
-- Webhook URL: `https://forex-line-bot.onrender.com/webhook`
-- 啟用 Webhook 使用
+4. **Environment** 新增（值從 LINE Developers Console 複製，勿寫進程式碼）：
 
----
+| Name | Value |
+|------|-------|
+| `LINE_CHANNEL_ACCESS_TOKEN` | （Channel access token） |
+| `LINE_CHANNEL_SECRET` | （Channel secret） |
+| `SERVER_BASE_URL` | `https://你的服務.onrender.com`（建議手動設，確保圖卡 HTTPS） |
 
-## 本地測試
+5. Create Web Service，等待部署完成。
+
+## 3. 設定 LINE Webhook
+
+1. LINE Developers Console → Messaging API
+2. Webhook URL：`https://你的服務.onrender.com/webhook`
+3. 啟用 **Use webhook**
+4. 點 **Verify** 應成功
+5. 建議關閉會搶答的 Auto-reply / 歡迎訊息（可選）
+
+## 4. 驗證
 
 ```bash
-cd /Users/a000/Downloads/forex_app/line_bot
-../venv/bin/python server.py
-```
+# 健康檢查（也可喚醒 Free 休眠）
+curl https://你的服務.onrender.com/health
 
-測試 Bot：
-```bash
-curl -X POST http://localhost:8080/test \
+# 業務邏輯測試（需在 Render 設 ENABLE_TEST_ENDPOINT=1）
+curl -X POST https://你的服務.onrender.com/test \
   -H "Content-Type: application/json" \
-  -d '{"text": "USD"}'
+  -d '{"text":"說明"}'
 ```
 
----
+在 LINE 傳送：`說明`、`USD`、`匯率`。
 
-## 功能說明
+## 注意
 
-| 指令 | 功能 |
-|------|------|
-| `USD`、`美元` | 查詢美元匯率與技術分析 |
-| `JPY`、`日圓` | 查詢日元匯率與技術分析 |
-| `匯率` | 查看所有主要貨幣匯率 |
-| `說明` | 查看幫助 |
+- Free 方案約 15 分鐘無流量會休眠；喚醒可能 30+ 秒，首則訊息可能失敗，先打 `/health` 再測。
+- Token / Secret 只放 Render Environment，不要提交到 git。
