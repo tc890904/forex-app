@@ -33,15 +33,17 @@ from ui import (
     build_backtest_flex,
     build_corr_flex,
     build_error_flex,
-    build_help_flex,
-    build_hint_carousel,
+    build_help_carousel,
     build_kelly_flex,
     build_leverage_flex,
     build_market_flex,
     build_ranking_flex,
-    build_rate_flex,
+    build_rate_detail_flex,
+    build_rate_summary_flex,
     build_sentiment_flex,
     build_signals_flex,
+    build_watchlist_flex,
+    build_welcome_flex,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -141,7 +143,7 @@ _CACHE_LOCK = threading.Lock()
 
 @dataclass
 class BotReply:
-    """Flex 分析卡 + 可選 K 線 PNG（由 server 掛成 Flex hero）。"""
+    """Flex 分析卡 + 可選 K 線；附情境 QR 資訊。"""
 
     alt_text: str
     flex: Any
@@ -149,6 +151,32 @@ class BotReply:
     chart_bytes: Optional[bytes] = None
     _rate_result: Optional[dict] = field(default=None, repr=False)
     _currency_name: Optional[str] = field(default=None, repr=False)
+    card_mode: str = "summary"  # summary | detail
+    qr_mode: str = "home"  # home | currency | tools | market
+    last_code: Optional[str] = None
+
+
+# 使用者狀態（記憶體；重啟後清空）
+_USER_STATE: dict[str, dict] = {}
+_USER_LOCK = threading.Lock()
+
+
+def _user_state(user_id: Optional[str]) -> dict:
+    uid = user_id or "_anon"
+    with _USER_LOCK:
+        if uid not in _USER_STATE:
+            _USER_STATE[uid] = {"last_code": "USD", "watchlist": []}
+        return _USER_STATE[uid]
+
+
+def _set_last(user_id: Optional[str], code: str) -> None:
+    st = _user_state(user_id)
+    with _USER_LOCK:
+        st["last_code"] = code
+
+
+def _get_last(user_id: Optional[str]) -> str:
+    return _user_state(user_id).get("last_code") or "USD"
 
 
 def _today() -> str:
@@ -409,16 +437,61 @@ def _collect_market(codes: list[str]) -> dict[str, dict]:
     return results
 
 
-def _reply_currency(code: str) -> BotReply:
+def _watchlist_get(user_id: Optional[str]) -> list[str]:
+    st = _user_state(user_id)
+    with _USER_LOCK:
+        return list(st.get("watchlist") or [])
+
+
+def _watchlist_add(user_id: Optional[str], code: str) -> list[str]:
+    st = _user_state(user_id)
+    with _USER_LOCK:
+        wl = st.setdefault("watchlist", [])
+        if code not in wl and len(wl) < 10:
+            wl.append(code)
+        return list(wl)
+
+
+def _watchlist_remove(user_id: Optional[str], code: str) -> list[str]:
+    st = _user_state(user_id)
+    with _USER_LOCK:
+        wl = st.setdefault("watchlist", [])
+        st["watchlist"] = [c for c in wl if c != code]
+        return list(st["watchlist"])
+
+
+def _reply_watchlist(user_id: Optional[str]) -> BotReply:
+    codes = _watchlist_get(user_id)
+    return BotReply(
+        alt_text="我的清單",
+        flex=build_watchlist_flex(codes, CURRENCY_NAMES),
+        text_fallback="清單：" + (", ".join(codes) if codes else "（空）"),
+        qr_mode="home",
+        last_code=_get_last(user_id),
+    )
+
+
+def _reply_currency(
+    code: str,
+    user_id: Optional[str] = None,
+    detail: bool = False,
+) -> BotReply:
     name = CURRENCY_NAMES.get(code, code)
     result = analyze_currency(code)
     if "error" in result:
         return BotReply(
             alt_text=f"{code} 暫無資料",
-            flex=build_error_flex("查無資料", result["error"]),
+            flex=build_error_flex(
+                "查無報價",
+                result["error"],
+                "可能是資料源暫時無回應，請稍後再試或改查其他幣別。",
+            ),
             text_fallback=result["error"],
+            qr_mode="home",
+            last_code=_get_last(user_id),
         )
 
+    _set_last(user_id, code)
     chart = None
     try:
         chart = generate_kline_png(
@@ -429,18 +502,22 @@ def _reply_currency(code: str) -> BotReply:
     except Exception:
         logger.exception("產生 K 線失敗 [%s]", code)
 
+    builder = build_rate_detail_flex if detail else build_rate_summary_flex
     alt = f"{code} {result['rate']['spot_sell']:.4f} {result['mood']}"
     return BotReply(
         alt_text=alt,
-        flex=build_rate_flex(result, name, chart_url=None),
+        flex=builder(result, name, chart_url=None),
         text_fallback=_rate_text_fallback(result, name),
         chart_bytes=chart,
         _rate_result=result,
         _currency_name=name,
+        card_mode="detail" if detail else "summary",
+        qr_mode="currency",
+        last_code=code,
     )
 
 
-def _reply_market() -> BotReply:
+def _reply_market(user_id: Optional[str] = None) -> BotReply:
     results = _collect_market(MAJOR_CURRENCIES)
     lines = ["市場速覽"]
     for code in MAJOR_CURRENCIES:
@@ -451,10 +528,12 @@ def _reply_market() -> BotReply:
         alt_text="市場速覽 · 主要貨幣匯率",
         flex=build_market_flex(results, MAJOR_CURRENCIES),
         text_fallback="\n".join(lines),
+        qr_mode="market",
+        last_code=_get_last(user_id),
     )
 
 
-def _reply_ranking() -> BotReply:
+def _reply_ranking(user_id: Optional[str] = None) -> BotReply:
     results = _collect_market(MAJOR_CURRENCIES)
     rows = strength_ranking(results)
     if not rows:
@@ -462,16 +541,20 @@ def _reply_ranking() -> BotReply:
             alt_text="強弱排行暫無資料",
             flex=build_error_flex("暫無資料", "無法計算漲跌排行，請稍後再試。"),
             text_fallback="強弱排行暫無資料",
+            qr_mode="market",
+            last_code=_get_last(user_id),
         )
     lines = [f"{r['code']} {r['change_pct']:+.2f}%" for r in rows]
     return BotReply(
         alt_text="強弱排行",
         flex=build_ranking_flex(rows),
         text_fallback="\n".join(lines),
+        qr_mode="market",
+        last_code=_get_last(user_id),
     )
 
 
-def _reply_signals_compare() -> BotReply:
+def _reply_signals_compare(user_id: Optional[str] = None) -> BotReply:
     results = _collect_market(MAJOR_CURRENCIES)
     rows = []
     for code in MAJOR_CURRENCIES:
@@ -495,22 +578,33 @@ def _reply_signals_compare() -> BotReply:
             alt_text="訊號暫無資料",
             flex=build_error_flex("暫無資料", "無法計算訊號比較。"),
             text_fallback="訊號暫無資料",
+            qr_mode="market",
+            last_code=_get_last(user_id),
         )
     return BotReply(
         alt_text="訊號比較",
         flex=build_signals_flex(rows),
         text_fallback="\n".join(f"{x['code']} {x['mood']} ({x['total_score']:+d})" for x in rows),
+        qr_mode="market",
+        last_code=_get_last(user_id),
     )
 
 
-def _reply_atr(code: str, direction: str = "long") -> BotReply:
+def _reply_atr(
+    code: str,
+    direction: str = "long",
+    user_id: Optional[str] = None,
+) -> BotReply:
     name = CURRENCY_NAMES.get(code, code)
+    _set_last(user_id, code)
     result = analyze_currency(code)
     if "error" in result:
         return BotReply(
             alt_text="停損計算失敗",
             flex=build_error_flex("查無資料", result["error"]),
             text_fallback=result["error"],
+            qr_mode="tools",
+            last_code=code,
         )
     detail = result.get("signal_detail") or {}
     atr = detail.get("atr")
@@ -524,17 +618,20 @@ def _reply_atr(code: str, direction: str = "long") -> BotReply:
             alt_text="ATR 不足",
             flex=build_error_flex("ATR 不足", f"{code} 無法計算 ATR 停損。"),
             text_fallback="ATR 不足",
+            qr_mode="tools",
+            last_code=code,
         )
     stops = calc_atr_stops(entry, atr, direction=direction)
     return BotReply(
         alt_text=f"{code} ATR 停損",
         flex=build_atr_flex(code, name, stops),
         text_fallback=f"{code} 停損 {stops['stop_loss']:.4f} 停利 {stops['take_profit']:.4f}",
+        qr_mode="tools",
+        last_code=code,
     )
 
 
-def _reply_kelly(parts: list[str]) -> BotReply:
-    # 凱利 [勝率] [盈虧比] [資金]
+def _reply_kelly(parts: list[str], user_id: Optional[str] = None) -> BotReply:
     win_rate, payoff, capital = 0.55, 1.5, 10000.0
     try:
         if len(parts) >= 1:
@@ -552,14 +649,15 @@ def _reply_kelly(parts: list[str]) -> BotReply:
         alt_text="凱利倉位建議",
         flex=build_kelly_flex(data),
         text_fallback=f"半凱利 {data['half_kelly_pct']:.1f}% / {data['half_kelly_amount']:.0f}",
+        qr_mode="tools",
+        last_code=_get_last(user_id),
     )
 
 
-def _reply_leverage(text: str) -> BotReply:
-    # 槓桿 [倍數] [幣別]
+def _reply_leverage(text: str, user_id: Optional[str] = None) -> BotReply:
     leverage = 10
-    code = "USD"
-    tokens = text.replace("槓桿", "").strip().split()
+    code = _get_last(user_id)
+    tokens = text.replace("槓桿", "").replace("leverage", "").strip().split()
     for tok in tokens:
         if tok.isdigit():
             leverage = int(tok)
@@ -574,15 +672,18 @@ def _reply_leverage(text: str) -> BotReply:
         price = result["rate"]["spot_sell"]
         detail = result.get("signal_detail") or {}
         atr = detail.get("atr")
+        _set_last(user_id, code)
     data = calc_leverage(10000.0, leverage, atr=atr, price=price)
     return BotReply(
         alt_text=f"槓桿風險 {leverage}x",
         flex=build_leverage_flex(data),
         text_fallback=f"槓桿 {leverage}x 風險{data['risk_level']}",
+        qr_mode="tools",
+        last_code=code,
     )
 
 
-def _reply_correlation() -> BotReply:
+def _reply_correlation(user_id: Optional[str] = None) -> BotReply:
     codes = MAJOR_CURRENCIES[:8]
     series_map = {}
     for code in codes:
@@ -599,27 +700,34 @@ def _reply_correlation() -> BotReply:
             alt_text="相關不足",
             flex=build_error_flex("相關不足", "無法計算貨幣相關矩陣。"),
             text_fallback="相關不足",
+            qr_mode="market",
+            last_code=_get_last(user_id),
         )
     matrix = {a: {b: float(corr.loc[a, b]) for b in corr.columns} for a in corr.index}
     return BotReply(
         alt_text="貨幣相關",
         flex=build_corr_flex(matrix, list(corr.columns)),
         text_fallback="貨幣相關矩陣已產生",
+        qr_mode="market",
+        last_code=_get_last(user_id),
     )
 
 
-def _reply_backtest(code: str) -> BotReply:
+def _reply_backtest(code: str, user_id: Optional[str] = None) -> BotReply:
     name = CURRENCY_NAMES.get(code, code)
+    _set_last(user_id, code)
     records = _fetch_exchange_data(code, 400)
     summary = simple_ma_backtest(records_to_df(records))
     return BotReply(
         alt_text=f"{code} 回測",
         flex=build_backtest_flex(code, name, summary),
         text_fallback=str(summary),
+        qr_mode="tools",
+        last_code=code,
     )
 
 
-def _reply_sentiment() -> BotReply:
+def _reply_sentiment(user_id: Optional[str] = None) -> BotReply:
     results = _collect_market(MAJOR_CURRENCIES)
     rows = []
     for code in MAJOR_CURRENCIES:
@@ -629,7 +737,6 @@ def _reply_sentiment() -> BotReply:
         detail = r.get("signal_detail")
         if not detail:
             continue
-        # map score -3..3 style from total_score roughly
         rows.append(
             {
                 "code": code,
@@ -642,11 +749,15 @@ def _reply_sentiment() -> BotReply:
             alt_text="情緒暫無資料",
             flex=build_error_flex("暫無資料", "無法計算情緒總覽。"),
             text_fallback="情緒暫無資料",
+            qr_mode="market",
+            last_code=_get_last(user_id),
         )
     return BotReply(
         alt_text="技術面情緒總覽",
         flex=build_sentiment_flex(rows),
         text_fallback="\n".join(f"{x['code']} {x['text']}" for x in rows),
+        qr_mode="market",
+        last_code=_get_last(user_id),
     )
 
 
@@ -656,91 +767,207 @@ def _extract_currency_from_command(text: str, prefixes: tuple[str, ...]) -> Opti
     for p in prefixes:
         if lower.startswith(p.lower()):
             rest = t[len(p) :].strip()
-            # 停損空 USD
             rest = rest.replace("空", " ").replace("多", " ").strip()
             if not rest:
-                return "USD"
-            code = resolve_currency(rest.split()[0] if rest.split() else rest)
-            return code
+                return None
+            return resolve_currency(rest.split()[0] if rest.split() else rest)
     return None
 
 
-def handle_query(text: str) -> BotReply:
+_KNOWN_CMDS = (
+    "說明",
+    "幫助",
+    "匯率",
+    "貨幣",
+    "市場",
+    "強弱",
+    "訊號",
+    "相關",
+    "情緒",
+    "凱利",
+    "槓桿",
+    "停損",
+    "回測",
+    "詳情",
+    "加入",
+    "移除",
+    "我的清單",
+    "開始",
+)
+
+
+def _fuzzy_command(text: str) -> Optional[str]:
+    """容錯：常見錯字／近似指令。"""
+    import difflib
+
+    t = text.strip().lower()
+    if len(t) < 2 or len(t) > 8:
+        return None
+    # 去掉空白後比對
+    compact = t.replace(" ", "")
+    matches = difflib.get_close_matches(compact, [c.lower() for c in _KNOWN_CMDS], n=1, cutoff=0.72)
+    if not matches:
+        return None
+    for c in _KNOWN_CMDS:
+        if c.lower() == matches[0]:
+            return c
+    return None
+
+
+def handle_query(text: str, user_id: Optional[str] = None) -> BotReply:
     """處理用戶輸入，回傳 BotReply。"""
     schedule_daily_warm()
     text = (text or "").strip()
+    last = _get_last(user_id)
 
-    if not text:
+    if not text or text.lower() in ("hi", "hello", "你好", "嗨", "開始", "start", "歡迎"):
         return BotReply(
-            alt_text="請選擇要查詢的貨幣",
-            flex=build_hint_carousel(),
-            text_fallback="請輸入幣別或「說明」查看指令。",
+            alt_text="歡迎使用 FOREX DESK",
+            flex=build_welcome_flex(),
+            text_fallback="輸入幣別代碼（如 USD）或「說明」開始。",
+            qr_mode="home",
+            last_code=last,
         )
 
-    if text.lower() in ["/help", "說明", "幫助", "help", "選單", "menu"]:
+    # 模糊指令容錯
+    fuzzy = _fuzzy_command(text)
+    if fuzzy and resolve_currency(text) is None:
+        text = fuzzy
+
+    if text.lower() in ("/help", "說明", "幫助", "help", "選單", "menu"):
         return BotReply(
             alt_text="FOREX DESK 使用說明",
-            flex=build_help_flex(),
+            flex=build_help_carousel(),
             text_fallback="輸入「說明」查看全部指令。",
+            qr_mode="home",
+            last_code=last,
         )
 
-    if text.lower() in ["/rates", "匯率", "匯率報價", "貨幣", "市場", "速覽"]:
-        return _reply_market()
+    if text in ("我的清單", "清單", "watchlist"):
+        return _reply_watchlist(user_id)
 
-    if text.lower() in ["強弱", "最強", "最弱", "排行", "strongest"]:
-        return _reply_ranking()
+    if text.startswith("加入") or text.lower().startswith("add "):
+        rest = text[2:].strip() if text.startswith("加入") else text[4:].strip()
+        code = resolve_currency(rest) if rest else last
+        if not code or code == "TWD":
+            return BotReply(
+                alt_text="請指定幣別",
+                flex=build_error_flex("請指定幣別", "範例：加入 USD"),
+                text_fallback="請輸入：加入 USD",
+                qr_mode="home",
+                last_code=last,
+            )
+        wl = _watchlist_add(user_id, code)
+        _set_last(user_id, code)
+        return BotReply(
+            alt_text=f"已加入 {code}",
+            flex=build_watchlist_flex(wl, CURRENCY_NAMES),
+            text_fallback=f"已加入 {code}",
+            qr_mode="home",
+            last_code=code,
+        )
 
-    if text.lower() in ["訊號", "信號", "signals", "比較"]:
-        return _reply_signals_compare()
+    if text.startswith("移除") or text.lower().startswith("remove "):
+        rest = text[2:].strip() if text.startswith("移除") else text[7:].strip()
+        code = resolve_currency(rest) if rest else last
+        if not code:
+            return BotReply(
+                alt_text="請指定幣別",
+                flex=build_error_flex("請指定幣別", "範例：移除 USD"),
+                text_fallback="請輸入：移除 USD",
+                qr_mode="home",
+                last_code=last,
+            )
+        wl = _watchlist_remove(user_id, code)
+        return BotReply(
+            alt_text=f"已移除 {code}",
+            flex=build_watchlist_flex(wl, CURRENCY_NAMES),
+            text_fallback=f"已移除 {code}",
+            qr_mode="home",
+            last_code=last,
+        )
 
-    if text.lower() in ["相關", "關聯", "corr", "correlation"]:
-        return _reply_correlation()
+    if text.startswith("詳情") or text.lower().startswith("detail"):
+        rest = text[2:].strip() if text.startswith("詳情") else text[6:].strip()
+        code = resolve_currency(rest) if rest else last
+        if code and code != "TWD":
+            return _reply_currency(code, user_id=user_id, detail=True)
+        return BotReply(
+            alt_text="請先查詢幣別",
+            flex=build_error_flex("請指定幣別", "先輸入 USD，再按「詳情」。"),
+            text_fallback="請輸入：詳情 USD",
+            qr_mode="home",
+            last_code=last,
+        )
 
-    if text.lower() in ["情緒", "sentiment"]:
-        return _reply_sentiment()
+    if text.lower() in ("/rates", "匯率", "匯率報價", "貨幣", "市場", "速覽"):
+        return _reply_market(user_id)
+
+    if text.lower() in ("強弱", "最強", "最弱", "排行", "strongest"):
+        return _reply_ranking(user_id)
+
+    if text.lower() in ("訊號", "信號", "signals", "比較"):
+        return _reply_signals_compare(user_id)
+
+    if text.lower() in ("相關", "關聯", "corr", "correlation"):
+        return _reply_correlation(user_id)
+
+    if text.lower() in ("情緒", "sentiment"):
+        return _reply_sentiment(user_id)
 
     if text.lower().startswith("凱利") or text.lower().startswith("kelly"):
         raw = text.split(None, 1)
         parts = raw[1].split() if len(raw) > 1 else []
-        return _reply_kelly(parts)
+        return _reply_kelly(parts, user_id)
 
     if text.lower().startswith("槓桿") or text.lower().startswith("leverage"):
-        return _reply_leverage(text)
+        return _reply_leverage(text, user_id)
 
-    # 停損 / ATR
     if text.lower().startswith("停損") or text.lower().startswith("atr"):
         direction = "short" if ("空" in text or "short" in text.lower()) else "long"
         code = _extract_currency_from_command(text, ("停損空", "停損多", "停損", "atr"))
+        code = code or last
         if code and code != "TWD":
-            return _reply_atr(code, direction=direction)
+            return _reply_atr(code, direction=direction, user_id=user_id)
         return BotReply(
             alt_text="請指定幣別",
-            flex=build_error_flex("請指定幣別", "範例：停損 USD 或 停損空 JPY"),
+            flex=build_error_flex(
+                "請指定幣別",
+                "範例：停損 USD 或 停損空 JPY",
+                "也可先查幣別，再按 Quick Reply「停損」。",
+            ),
             text_fallback="請輸入：停損 USD",
+            qr_mode="tools",
+            last_code=last,
         )
 
     if text.lower().startswith("回測") or text.lower().startswith("backtest"):
         code = _extract_currency_from_command(text, ("回測", "backtest"))
+        code = code or last
         if code and code != "TWD":
-            return _reply_backtest(code)
+            return _reply_backtest(code, user_id)
         return BotReply(
             alt_text="請指定幣別",
             flex=build_error_flex("請指定幣別", "範例：回測 USD"),
             text_fallback="請輸入：回測 USD",
+            qr_mode="tools",
+            last_code=last,
         )
 
-    if "strongest" in text.lower() or "最強" in text:
-        return _reply_ranking()
+    if "strongest" in text.lower() or text == "最強":
+        return _reply_ranking(user_id)
 
     if text.lower().startswith("分析") or text.lower().startswith("analyze"):
         query = text[2:].strip() if text.lower().startswith("分析") else text[7:].strip()
-        code = resolve_currency(query)
+        code = resolve_currency(query) or last
         if code and code != "TWD":
-            return _reply_currency(code)
+            return _reply_currency(code, user_id=user_id)
         return BotReply(
             alt_text="無法識別幣別",
             flex=build_error_flex("無法識別", "請改輸入代碼，例如：分析 USD"),
             text_fallback=f"無法識別幣別：{query}",
+            qr_mode="home",
+            last_code=last,
         )
 
     code = resolve_currency(text)
@@ -753,14 +980,19 @@ def handle_query(text: str) -> BotReply:
                     "台幣（TWD）為報價基準，請查詢其他幣別對 TWD 的匯率。",
                 ),
                 text_fallback="台幣為基準貨幣，請查詢其他幣別。",
+                qr_mode="home",
+                last_code=last,
             )
-        return _reply_currency(code)
+        return _reply_currency(code, user_id=user_id)
 
     return BotReply(
         alt_text="無法識別指令",
         flex=build_error_flex(
             "無法識別",
-            f'找不到「{text}」。輸入「說明」查看匯率、訊號、停損、回測等指令。',
+            f'找不到「{text}」。',
+            "試試 USD、匯率、強弱，或輸入「說明」。",
         ),
         text_fallback=f"無法識別：{text}。請輸入「說明」。",
+        qr_mode="home",
+        last_code=last,
     )

@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -31,10 +30,22 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import (
+    ImageMessageContent,
+    MessageEvent,
+    StickerMessageContent,
+    TextMessageContent,
+)
 
 from bot_core import BotReply, handle_query, schedule_daily_warm
-from ui import build_rate_flex, default_quick_reply, to_flex_message
+from ui import (
+    build_error_flex,
+    build_rate_detail_flex,
+    build_rate_summary_flex,
+    contextual_quick_reply,
+    default_quick_reply,
+    to_flex_message,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,7 +83,6 @@ SERVER_BASE_URL = (
     or "http://localhost:8080"
 ).rstrip("/")
 
-# 啟動時觸發當日預熱
 try:
     schedule_daily_warm()
 except Exception:
@@ -103,9 +113,23 @@ def _reply(reply_token: str, messages: list) -> None:
         )
 
 
+def _qr_for(reply: BotReply):
+    return contextual_quick_reply(reply.qr_mode or "home", reply.last_code)
+
+
+def _rebuild_rate_flex(reply: BotReply, chart_url: str | None):
+    if reply._rate_result is None:
+        return reply.flex
+    name = reply._currency_name or ""
+    if reply.card_mode == "detail":
+        return build_rate_detail_flex(reply._rate_result, name, chart_url=chart_url)
+    return build_rate_summary_flex(reply._rate_result, name, chart_url=chart_url)
+
+
 def _build_messages(reply: BotReply) -> list:
     """Flex 卡；若有 K 線且為 HTTPS，嵌成 hero。"""
     flex = reply.flex
+    qr = _qr_for(reply)
 
     if reply.chart_bytes and reply._rate_result is not None:
         try:
@@ -115,22 +139,24 @@ def _build_messages(reply: BotReply) -> list:
             )
             logger.info("K 線已保存: %s", chart_url)
             if chart_url.startswith("https://"):
-                flex = build_rate_flex(
-                    reply._rate_result,
-                    reply._currency_name or "",
-                    chart_url=chart_url,
-                )
+                flex = _rebuild_rate_flex(reply, chart_url)
             else:
                 logger.info("非 HTTPS，Flex 不嵌入 K 線（LINE 要求 https 圖）")
         except Exception:
             logger.exception("掛載 K 線失敗")
 
     if flex is not None:
-        return [to_flex_message(flex, reply.alt_text or "FOREX DESK", quick_reply=True)]
+        return [
+            to_flex_message(
+                flex,
+                reply.alt_text or "FOREX DESK",
+                quick_reply=qr,
+            )
+        ]
     return [
         TextMessage(
             text=_truncate_text(reply.text_fallback or "（無內容）"),
-            quick_reply=default_quick_reply(),
+            quick_reply=qr,
         )
     ]
 
@@ -143,13 +169,22 @@ def serve_chart(filename: str):
     return send_from_directory(IMAGE_DIR, safe_name)
 
 
+def _user_id_from_event(event: MessageEvent) -> str | None:
+    try:
+        src = event.source
+        return getattr(src, "user_id", None)
+    except Exception:
+        return None
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event: MessageEvent) -> None:
     try:
         user_text = event.message.text
-        logger.info("收到訊息: %s", user_text)
+        user_id = _user_id_from_event(event)
+        logger.info("收到訊息: %s (user=%s)", user_text, user_id)
 
-        reply = handle_query(user_text)
+        reply = handle_query(user_text, user_id=user_id)
         if not isinstance(reply, BotReply):
             reply = BotReply(
                 alt_text="訊息",
@@ -167,14 +202,43 @@ def handle_message(event: MessageEvent) -> None:
             _reply(
                 event.reply_token,
                 [
-                    TextMessage(
-                        text="暫時無法處理，請稍後再試。",
+                    to_flex_message(
+                        build_error_flex(
+                            "暫時無法處理",
+                            "伺服器忙碌或資料源異常，請稍後再試。",
+                            "也可輸入「說明」查看指令。",
+                        ),
+                        "暫時無法處理",
                         quick_reply=default_quick_reply(),
                     )
                 ],
             )
         except Exception:
             logger.exception("錯誤回覆也失敗")
+
+
+@handler.add(MessageEvent, message=StickerMessageContent)
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_non_text(event: MessageEvent) -> None:
+    """貼圖／圖片：導向歡迎與說明。"""
+    try:
+        user_id = _user_id_from_event(event)
+        reply = handle_query("開始", user_id=user_id)
+        _reply(event.reply_token, _build_messages(reply))
+    except Exception:
+        logger.exception("非文字訊息處理失敗")
+        try:
+            _reply(
+                event.reply_token,
+                [
+                    TextMessage(
+                        text="請輸入幣別代碼（如 USD）或「說明」。",
+                        quick_reply=default_quick_reply(),
+                    )
+                ],
+            )
+        except Exception:
+            logger.exception("非文字錯誤回覆失敗")
 
 
 @app.route("/webhook", methods=["POST"])
@@ -205,7 +269,7 @@ def health():
             "status": "healthy" if ready else "degraded",
             "ready": ready,
             "service": "forex-line-bot",
-            "ui": "flex-full",
+            "ui": "flex-ux-v2",
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
             "server_base_url": SERVER_BASE_URL,
@@ -242,8 +306,9 @@ def test():
         return jsonify({"error": "Missing 'text' field"}), 400
 
     text = data["text"]
+    user_id = data.get("user_id")
     try:
-        reply = handle_query(text)
+        reply = handle_query(text, user_id=user_id)
         chart_url = None
         flex = reply.flex
         if reply.chart_bytes and reply._rate_result is not None:
@@ -251,23 +316,28 @@ def test():
                 reply.chart_bytes,
                 currency=reply._rate_result["rate"]["currency"],
             )
-            if chart_url.startswith("https://") or True:
-                # 本機測試也重建 flex（即使 http）方便看結構
-                flex = build_rate_flex(
-                    reply._rate_result,
-                    reply._currency_name or "",
-                    chart_url=chart_url if chart_url.startswith("https://") else None,
-                )
+            # 本機測試也重建 flex（http 則不掛圖）
+            flex = _rebuild_rate_flex(
+                reply,
+                chart_url if chart_url.startswith("https://") else None,
+            )
 
         flex_dict = None
         if flex is not None:
-            flex_dict = to_flex_message(flex, reply.alt_text).to_dict()
+            flex_dict = to_flex_message(
+                flex,
+                reply.alt_text,
+                quick_reply=_qr_for(reply),
+            ).to_dict()
 
         return jsonify(
             {
                 "original": text,
                 "alt_text": reply.alt_text,
                 "reply": reply.text_fallback,
+                "card_mode": reply.card_mode,
+                "qr_mode": reply.qr_mode,
+                "last_code": reply.last_code,
                 "has_flex": flex is not None,
                 "has_chart": reply.chart_bytes is not None,
                 "chart_url": chart_url,
@@ -277,19 +347,9 @@ def test():
         )
     except Exception as e:
         logger.exception("Test error: %s", e)
-        return jsonify(
-            {
-                "original": text,
-                "error": str(e),
-                "traceback": traceback.format_exc(),
-                "success": False,
-            }
-        ), 500
+        return jsonify({"error": str(e), "success": False}), 500
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
-    debug = os.getenv("FLASK_DEBUG", "0") == "1"
-    logger.info("啟動 LINE Bot Server 在 port %s (debug=%s)", port, debug)
-    logger.info("Webhook URL: %s/webhook", SERVER_BASE_URL)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="0.0.0.0", port=port, debug=False)
