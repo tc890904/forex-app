@@ -1,13 +1,13 @@
 """
-LINE Bot Webhook Server - Final Working Version
+LINE Bot Webhook Server - Debug Version
 
 使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
-支援文字訊息、圖片訊息（匯率圖卡）和快速回覆按鈕。
 """
 
 import os
 import sys
 import logging
+import traceback
 import uuid
 from pathlib import Path
 from dotenv import load_dotenv
@@ -20,12 +20,20 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from flask import Flask, request, jsonify, send_from_directory
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import MessageEvent
-from linebot.v3.messaging import ImageMessage, TextMessage
-from linebot.models import QuickReply, QuickReplyButton, MessageAction
-from linebot import LineBotApi
+
+# 使用 LINE Bot SDK v3
+try:
+    from linebot.v3 import WebhookHandler
+    from linebot.v3.exceptions import InvalidSignatureError
+    from linebot.v3.webhooks import MessageEvent
+    from linebot.v3.messaging import ImageMessage, TextMessage
+    from linebot.models import QuickReply, QuickReplyButton, MessageAction
+    from linebot import LineBotApi
+    print("✅ LINE SDK v3 imports successful")
+except Exception as e:
+    print(f"❌ LINE SDK import error: {e}")
+    traceback.print_exc()
+    sys.exit(1)
 
 from bot_core import handle_query
 
@@ -41,6 +49,9 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 # LINE Bot 設定（從環境變數讀取）
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    print("⚠️ WARNING: LINE_CHANNEL_ACCESS_TOKEN or LINE_CHANNEL_SECRET not set!")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -140,7 +151,7 @@ def handle_message(event):
                     preview_image_url=image_url
                 ))
             except Exception as e:
-                logger.error(f"保存图片時出錯: {e}")
+                logger.error(f"保存图片時出錯: {e}", exc_info=True)
         
         # 添加文字訊息（包含快速按鈕）
         messages.append(TextMessage(
@@ -181,7 +192,7 @@ def webhook():
         return jsonify({"error": "Invalid signature"}), 400
     except Exception as e:
         logger.error(f"Webhook processing error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
     return jsonify({"status": "ok"}), 200
 
@@ -189,7 +200,13 @@ def webhook():
 @app.route("/health", methods=["GET"])
 def health():
     """健康檢查 endpoint。"""
-    return jsonify({"status": "healthy", "service": "forex-line-bot"})
+    return jsonify({
+        "status": "healthy", 
+        "service": "forex-line-bot",
+        "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        "secret_set": bool(LINE_CHANNEL_SECRET),
+        "images_dir": str(IMAGE_DIR),
+    })
 
 
 @app.route("/test", methods=["POST"])
