@@ -1,5 +1,5 @@
 """
-LINE Bot Webhook Server - Debug Version
+LINE Bot Webhook Server - Fixed QuickReply
 
 使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
 """
@@ -153,11 +153,8 @@ def handle_message(event):
             except Exception as e:
                 logger.error(f"保存图片時出錯: {e}", exc_info=True)
         
-        # 添加文字訊息（包含快速按鈕）
-        messages.append(TextMessage(
-            text=reply_text,
-            quick_reply=QUICK_REPLY
-        ))
+        # 添加文字訊息（不包含 quick_reply，因為 TextMessage 不支援）
+        messages.append(TextMessage(text=reply_text))
 
         # 發送訊息
         line_bot_api.reply_message(
@@ -172,7 +169,7 @@ def handle_message(event):
             error_msg = f"⚠️ 錯誤: {str(e)[:100]}"
             line_bot_api.reply_message(
                 event.reply_token,
-                TextMessage(text=error_msg)
+                [TextMessage(text=error_msg)]
             )
         except:
             pass
