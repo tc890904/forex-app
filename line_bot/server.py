@@ -1,5 +1,5 @@
 """
-LINE Bot Webhook Server
+LINE Bot Webhook Server - Simple Version
 
 使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
 """
@@ -19,16 +19,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from flask import Flask, request, jsonify
 
 # 使用 LINE Bot SDK v3
-from linebot.v3 import WebhookHandler, LineBotApi
+from linebot.v3 import WebhookHandler, SignatureValidator
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import TextMessageEvent
-from linebot.v3.models import (
-    TextMessage,
-    TextSendMessage,
-    QuickReply,
-    QuickReplyButton,
-    MessageAction,
-)
+from linebot.v3.models import TextMessage, TextSendMessage, QuickReply, QuickReplyButton, MessageAction
+from linebot import LineBotApi
 
 from bot_core import handle_query
 
@@ -57,18 +52,10 @@ def handle_message(event):
     # 建立快速回覆按鈕
     quick_reply = QuickReply(
         items=[
-            QuickReplyButton(
-                action=MessageAction(label="說明", text="說明"),
-            ),
-            QuickReplyButton(
-                action=MessageAction(label="匯率", text="匯率"),
-            ),
-            QuickReplyButton(
-                action=MessageAction(label="USD", text="USD"),
-            ),
-            QuickReplyButton(
-                action=MessageAction(label="JPY", text="JPY"),
-            ),
+            QuickReplyButton(action=MessageAction(label="說明", text="說明")),
+            QuickReplyButton(action=MessageAction(label="匯率", text="匯率")),
+            QuickReplyButton(action=MessageAction(label="USD", text="USD")),
+            QuickReplyButton(action=MessageAction(label="JPY", text="JPY")),
         ]
     )
 
@@ -110,16 +97,10 @@ def test():
     text = data["text"]
     reply_text = handle_query(text)
 
-    return jsonify({
-        "original": text,
-        "reply": reply_text,
-    })
+    return jsonify({"original": text, "reply": reply_text})
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     logger.info(f"啟動 LINE Bot Server 在 port {port}")
-    logger.info(f"Webhook URL: http://localhost:{port}/webhook")
-    logger.info(f"Health Check: http://localhost:{port}/health")
-    logger.info(f"Test API:     POST http://localhost:{port}/test")
     app.run(host="0.0.0.0", port=port, debug=True)
