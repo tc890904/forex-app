@@ -132,9 +132,11 @@ FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_DATASET = "TaiwanExchangeRate"
 API_TIMEOUT = 8
 
-_CACHE: dict[str, tuple[str, list[dict]]] = {}
+_CACHE: dict[str, tuple[str, float, list[dict]]] = {}
+_CACHE_TTL_SEC = 3600.0  # 當日內最長 1 小時，避免盤中不更新
 _WARM_DAY: Optional[str] = None
 _WARM_LOCK = threading.Lock()
+_CACHE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -154,18 +156,23 @@ def _today() -> str:
 
 
 def _cache_get(key: str) -> Optional[list[dict]]:
-    item = _CACHE.get(key)
-    if not item:
-        return None
-    cache_day, data = item
-    if cache_day != _today():
-        _CACHE.pop(key, None)
-        return None
-    return data
+    with _CACHE_LOCK:
+        item = _CACHE.get(key)
+        if not item:
+            return None
+        cache_day, ts, data = item
+        if cache_day != _today():
+            _CACHE.pop(key, None)
+            return None
+        if datetime.now().timestamp() - ts > _CACHE_TTL_SEC:
+            _CACHE.pop(key, None)
+            return None
+        return data
 
 
 def _cache_set(key: str, data: list[dict]) -> None:
-    _CACHE[key] = (_today(), data)
+    with _CACHE_LOCK:
+        _CACHE[key] = (_today(), datetime.now().timestamp(), data)
 
 
 def _fetch_exchange_data(currency_code: str, days: int = 120) -> list[dict]:
@@ -294,8 +301,30 @@ def analyze_currency(currency_code: str) -> dict:
     records = _fetch_exchange_data(currency_code, days=120)
     rate = _records_to_rate(currency_code, records)
     tech = _records_to_tech(records)
-    if not rate or not tech:
+    if not rate:
         return {"error": f"無法取得 {currency_code} 的資料"}
+
+    detail = score_signals(records_to_df(records))
+
+    # 技術指標不足時仍回傳匯率；評分改用 signal_detail 或降級
+    if not tech:
+        tech = {
+            "close": rate["spot_sell"],
+            "ma20": None,
+            "ma50": None,
+            "rsi": None,
+            "dif": None,
+            "dea": None,
+            "change_pct": None,
+        }
+        if len(records) >= 2:
+            try:
+                prev = float(records[-2].get("spot_sell") or records[-2].get("cash_sell") or 0)
+                cur = rate["spot_sell"]
+                if prev:
+                    tech["change_pct"] = (cur - prev) / prev * 100
+            except (TypeError, ValueError):
+                pass
 
     score = 0
     signals: list[str] = []
@@ -323,16 +352,22 @@ def analyze_currency(currency_code: str) -> dict:
             score -= 1
             signals.append("MACD 死叉")
 
-    if score >= 2:
-        mood = "強烈看多"
-    elif score >= 1:
-        mood = "偏多"
-    elif score <= -2:
-        mood = "強烈看空"
-    elif score <= -1:
-        mood = "偏空"
+    # 與五維評分對齊，避免同卡矛盾
+    if detail:
+        score = detail["total_score"]
+        mood = detail["mood"]
+        signals = [f"{it['name']}{it['verdict']}" for it in detail["items"]]
     else:
-        mood = "中性"
+        if score >= 2:
+            mood = "強烈看多"
+        elif score >= 1:
+            mood = "偏多"
+        elif score <= -2:
+            mood = "強烈看空"
+        elif score <= -1:
+            mood = "偏空"
+        else:
+            mood = "中性"
 
     return {
         "rate": rate,
@@ -341,7 +376,7 @@ def analyze_currency(currency_code: str) -> dict:
         "signals": signals,
         "score": score,
         "records": records,
-        "signal_detail": score_signals(records_to_df(records)),
+        "signal_detail": detail,
     }
 
 

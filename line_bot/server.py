@@ -10,7 +10,6 @@ import logging
 import os
 import sys
 import traceback
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -58,6 +57,11 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
         "LINE_CHANNEL_ACCESS_TOKEN or LINE_CHANNEL_SECRET not set — "
         "webhook replies will fail until env vars are configured"
     )
+    if os.getenv("RENDER"):
+        logger.error(
+            "Render 環境缺少 LINE 憑證：請在 Dashboard Environment 設定 "
+            "LINE_CHANNEL_ACCESS_TOKEN 與 LINE_CHANNEL_SECRET"
+        )
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -82,11 +86,9 @@ def _truncate_text(text: str) -> str:
 
 
 def save_chart(image_bytes: bytes, currency: str = "chart") -> str:
-    filename = (
-        f"{currency}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}.png"
-    )
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise ValueError("invalid filename")
+    """同一幣別當日覆寫，避免磁碟堆積。"""
+    safe_cur = "".join(c for c in currency if c.isalnum())[:8] or "chart"
+    filename = f"{safe_cur}_{datetime.now().strftime('%Y%m%d')}.png"
     path = IMAGE_DIR / filename
     with open(path, "wb") as f:
         f.write(image_bytes)
@@ -197,17 +199,20 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
+    ready = bool(LINE_CHANNEL_ACCESS_TOKEN) and bool(LINE_CHANNEL_SECRET)
     return jsonify(
         {
-            "status": "healthy",
+            "status": "healthy" if ready else "degraded",
+            "ready": ready,
             "service": "forex-line-bot",
             "ui": "flex-full",
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
             "server_base_url": SERVER_BASE_URL,
+            "https_charts": SERVER_BASE_URL.startswith("https://"),
             "charts_dir": str(IMAGE_DIR),
         }
-    )
+    ), (200 if ready else 503)
 
 
 @app.route("/", methods=["GET"])
