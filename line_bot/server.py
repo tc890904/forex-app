@@ -1,8 +1,8 @@
 """
-LINE Bot Webhook Server - Optimized Version
+LINE Bot Webhook Server - Final Version with Quick Replies
 
 使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
-支援文字訊息和圖片訊息（匯率圖卡）。
+支援文字訊息和快速回覆按鈕。
 """
 
 import os
@@ -40,6 +40,47 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# 快速回覆按鈕定義
+QUICK_REPLY_ITEMS = [
+    QuickReplyButton(
+        action=MessageAction(
+            label="💵 USD",
+            text="USD"
+        )
+    ),
+    QuickReplyButton(
+        action=MessageAction(
+            label="💴 JPY",
+            text="JPY"
+        )
+    ),
+    QuickReplyButton(
+        action=MessageAction(
+            label="💶 EUR",
+            text="EUR"
+        )
+    ),
+    QuickReplyButton(
+        action=MessageAction(
+            label="💷 GBP",
+            text="GBP"
+        )
+    ),
+    QuickReplyButton(
+        action=MessageAction(
+            label="📊 匯率",
+            text="匯率"
+        )
+    ),
+    QuickReplyButton(
+        action=MessageAction(
+            label="❓ 說明",
+            text="說明"
+        )
+    ),
+]
+QUICK_REPLY = QuickReply(items=QUICK_REPLY_ITEMS)
+
 
 @handler.add(MessageEvent)
 def handle_message(event):
@@ -57,30 +98,25 @@ def handle_message(event):
         else:
             reply_text = result
 
-        # 建立快速回覆按鈕（分兩排顯示）
-        quick_reply = QuickReply(
-            items=[
-                QuickReplyButton(action=MessageAction(label="💵 USD", text="USD")),
-                QuickReplyButton(action=MessageAction(label="💴 JPY", text="JPY")),
-                QuickReplyButton(action=MessageAction(label="💶 EUR", text="EUR")),
-                QuickReplyButton(action=MessageAction(label="💷 GBP", text="GBP")),
-                QuickReplyButton(action=MessageAction(label="📊 匯率", text="匯率")),
-                QuickReplyButton(action=MessageAction(label="❓ 說明", text="說明")),
-            ]
+        # 發送文字訊息（包含快速回覆按鈕）
+        reply_message = TextSendMessage(
+            text=reply_text,
+            quickReply=QUICK_REPLY
         )
-
-        # 發送文字訊息
+        
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=reply_text, quickReply=quick_reply)
+            reply_message
         )
         logger.info(f"已回覆成功")
+        
     except Exception as e:
         logger.error(f"處理訊息時出錯: {e}", exc_info=True)
         try:
+            error_msg = f"⚠️ 錯誤: {str(e)[:100]}"
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=f"⚠️ 錯誤: {str(e)[:100]}")
+                TextSendMessage(text=error_msg)
             )
         except:
             pass
