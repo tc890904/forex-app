@@ -19,9 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from flask import Flask, request, jsonify
 
 # 使用 LINE Bot SDK v3
-from linebot.v3 import WebhookHandler, SignatureValidator
+from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import TextMessageEvent
+from linebot.v3.webhooks import MessageEvent
 from linebot.v3.models import TextMessage, TextSendMessage, QuickReply, QuickReplyButton, MessageAction
 from linebot import LineBotApi
 
@@ -40,7 +40,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 
-@handler.add(TextMessageEvent, pattern=".*")
+@handler.add(MessageEvent)
 def handle_message(event):
     """處理文字訊息。"""
     user_text = event.message.text
