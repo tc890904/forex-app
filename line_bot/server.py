@@ -1,5 +1,5 @@
 """
-LINE Bot Webhook Server - With Image Support via Static Files
+LINE Bot Webhook Server - Final Working Version
 
 使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
 支援文字訊息、圖片訊息（匯率圖卡）和快速回覆按鈕。
@@ -11,6 +11,7 @@ import logging
 import uuid
 from pathlib import Path
 from dotenv import load_dotenv
+from datetime import datetime
 
 # 載入 .env 環境變數
 load_dotenv()
@@ -18,14 +19,11 @@ load_dotenv()
 # 添加當前目錄到 Python 路徑
 sys.path.insert(0, str(Path(__file__).parent))
 
-from flask import Flask, request, jsonify, send_file
-from datetime import datetime
-
-# 使用 LINE Bot SDK v3
+from flask import Flask, request, jsonify, send_from_directory
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import MessageEvent
-from linebot.v3.messaging import ImageMessage, TextMessage, ReplyMessageRequest
+from linebot.v3.messaging import ImageMessage, TextMessage
 from linebot.models import QuickReply, QuickReplyButton, MessageAction
 from linebot import LineBotApi
 
@@ -34,7 +32,7 @@ from bot_core import handle_query
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 
 # 建立圖片儲存目錄
 IMAGE_DIR = Path(__file__).parent / "static" / "images"
@@ -88,8 +86,8 @@ QUICK_REPLY_ITEMS = [
 ]
 QUICK_REPLY = QuickReply(items=QUICK_REPLY_ITEMS)
 
-# 伺服器基礎 URL（從環境變數讀取，或預設為 localhost）
-SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "http://localhost:8080")
+# 伺服器基礎 URL（從環境變數讀取）
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8080")
 
 
 def save_image_to_disk(image_bytes: bytes, filename: str = None) -> str:
@@ -103,6 +101,12 @@ def save_image_to_disk(image_bytes: bytes, filename: str = None) -> str:
     
     # 返回可訪問的 URL
     return f"{SERVER_BASE_URL}/static/images/{filename}"
+
+
+@app.route('/static/images/<filename>')
+def serve_image(filename):
+    """提供圖片文件。"""
+    return send_from_directory(IMAGE_DIR, filename)
 
 
 @handler.add(MessageEvent)
@@ -229,8 +233,8 @@ def test():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     logger.info(f"啟動 LINE Bot Server 在 port {port}")
-    logger.info(f"Webhook URL: http://localhost:{port}/webhook")
-    logger.info(f"Health Check: http://localhost:{port}/health")
-    logger.info(f"Test API:     POST http://localhost:{port}/test")
-    logger.info(f"Images URL:   http://localhost:{port}/static/images/")
+    logger.info(f"Webhook URL: {SERVER_BASE_URL}/webhook")
+    logger.info(f"Health Check: {SERVER_BASE_URL}/health")
+    logger.info(f"Test API:     POST {SERVER_BASE_URL}/test")
+    logger.info(f"Images URL:   {SERVER_BASE_URL}/static/images/")
     app.run(host="0.0.0.0", port=port, debug=True)
