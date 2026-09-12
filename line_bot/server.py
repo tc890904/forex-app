@@ -23,7 +23,7 @@ from flask import Flask, request, jsonify
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import MessageEvent
-from linebot.v3.models import TextMessage, TextSendMessage, QuickReply, QuickReplyButton, MessageAction, ImageMessage
+from linebot.models import TextSendMessage, QuickReply, QuickReplyButton, MessageAction
 from linebot import LineBotApi
 
 from bot_core import handle_query
@@ -47,21 +47,9 @@ def handle_message(event):
     user_text = event.message.text
     logger.info(f"收到訊息: {user_text}")
 
-    # 處理查詢，回傳文字和圖片
-    reply_text, image_data = handle_query(user_text)
+    # 處理查詢，回傳文字
+    reply_text = handle_query(user_text)
 
-    # 如果有圖片，先發送圖片
-    messages = []
-    if image_data:
-        # 將圖片轉換為 base64 或直接發送
-        from io import BytesIO
-        from linebot.v3.models import OriginalContent
-        image_bytes = BytesIO(image_data)
-        messages.append(ImageMessage(
-            original_content_url=f"https://forex-line-bot-wre5.onrender.com/image/{hash(image_data) % 10000}",
-            preview_image_url=f"https://forex-line-bot-wre5.onrender.com/image/{hash(image_data) % 10000}",
-        ))
-    
     # 建立快速回覆按鈕
     quick_reply = QuickReply(
         items=[
@@ -74,11 +62,9 @@ def handle_message(event):
     )
 
     # 發送文字訊息
-    messages.append(TextSendMessage(text=reply_text, quickReply=quick_reply))
-
     line_bot_api.reply_message(
         event.reply_token,
-        messages
+        TextSendMessage(text=reply_text, quickReply=quick_reply)
     )
 
 
@@ -112,12 +98,11 @@ def test():
         return jsonify({"error": "Missing 'text' field"}), 400
 
     text = data["text"]
-    reply_text, image_data = handle_query(text)
+    reply_text = handle_query(text)
 
     return jsonify({
         "original": text,
         "reply": reply_text,
-        "has_image": image_data is not None,
     })
 
 
