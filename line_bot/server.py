@@ -21,7 +21,7 @@ from flask import Flask, request, jsonify
 # 使用 LINE Bot SDK v3
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import TextMessageEvent
+from linebot.v3.webhooks import MessageEvent
 from linebot.models import TextSendMessage, QuickReply, QuickReplyButton, MessageAction
 from linebot import LineBotApi
 
@@ -40,7 +40,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 
-@handler.add(TextMessageEvent, pattern=".*")
+@handler.add(MessageEvent)
 def handle_message(event):
     """處理文字訊息。"""
     try:
@@ -50,7 +50,7 @@ def handle_message(event):
         # 處理查詢
         result = handle_query(user_text)
         
-        # handle_query 返回 tuple (text, image_data) 或直接返回 text
+        # handle_query 返回 tuple (text, image_data)
         if isinstance(result, tuple):
             reply_text = result[0]
         else:
