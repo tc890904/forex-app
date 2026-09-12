@@ -369,7 +369,7 @@ def handle_query(text: str) -> BotReply:
             text_fallback="輸入幣別代碼或中文名稱查詢匯率。輸入「匯率」查看市場速覽。",
         )
 
-    if text.lower() in ["/rates", "匯率", "匯率報價", "市場", "速覽"]:
+    if text.lower() in ["/rates", "匯率", "匯率報價", "貨幣", "市場", "速覽"]:
         return _reply_market()
 
     if "strongest" in text.lower() or "最強" in text:
