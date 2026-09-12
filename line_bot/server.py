@@ -2,6 +2,7 @@
 LINE Bot Webhook Server - Optimized Version
 
 使用 Flask 建立 webhook endpoint，接收 LINE 訊息並回傳。
+支援文字訊息和圖片訊息（匯率圖卡）。
 """
 
 import os
@@ -56,12 +57,13 @@ def handle_message(event):
         else:
             reply_text = result
 
-        # 建立快速回覆按鈕
+        # 建立快速回覆按鈕（分兩排顯示）
         quick_reply = QuickReply(
             items=[
                 QuickReplyButton(action=MessageAction(label="💵 USD", text="USD")),
                 QuickReplyButton(action=MessageAction(label="💴 JPY", text="JPY")),
                 QuickReplyButton(action=MessageAction(label="💶 EUR", text="EUR")),
+                QuickReplyButton(action=MessageAction(label="💷 GBP", text="GBP")),
                 QuickReplyButton(action=MessageAction(label="📊 匯率", text="匯率")),
                 QuickReplyButton(action=MessageAction(label="❓ 說明", text="說明")),
             ]

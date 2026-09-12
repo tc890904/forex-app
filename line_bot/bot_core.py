@@ -1,10 +1,10 @@
 """
-LINE Bot — 外匯行情查詢機器人 (優化版)
+LINE Bot — 外匯行情查詢機器人 (最終優化版)
 
 支援功能：
   - 即時匯率查詢（輸入幣別代碼或中文名）
   - 技術指標分析（RSI、MACD、MA 趨勢）
-  - 圖卡生成（匯率卡片）
+  - 圖卡生成（匯率卡片圖片）
   - 貨幣強弱排名
   - 快速按鈕選擇
   - 快速指令（/rates, /help）
@@ -38,6 +38,8 @@ CURRENCY_ALIASES: dict[str, str] = {
     "港幣": "HKD", "新加坡幣": "SGD", "紐幣": "NZD", "瑞典克朗": "SEK",
     "南非幣": "ZAR", "泰銖": "THB", "菲律賓披索": "PHP", "印尼盾": "IDR",
     "韓元": "KRW", "越南盾": "VND", "馬來幣": "MYR",
+    # 其他常見輸入
+    "美金": "USD", "台幣": "TWD",
 }
 
 # 貨幣圖標 emoji
@@ -57,6 +59,9 @@ CURRENCY_NAMES = {
     "ZAR": "南非幣", "THB": "泰銖", "PHP": "菲律賓披索", "IDR": "印尼盾",
     "KRW": "韓元", "VND": "越南盾", "MYR": "馬來幣",
 }
+
+# 主要貨幣列表（按重要性排序）
+MAJOR_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "HKD", "SGD", "CNY"]
 
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_DATASET = "TaiwanExchangeRate"
@@ -236,17 +241,17 @@ def generate_rate_card(currency_code: str) -> Optional[bytes]:
     r = result["rate"]
     t = result["tech"]
 
-    # 建立圖片
-    width, height = 400, 280
+    # 建立圖片 (深色主題)
+    width, height = 420, 300
     img = Image.new('RGB', (width, height), color='#1a1a2e')
     draw = ImageDraw.Draw(img)
 
     # 嘗試載入字體
     try:
-        font_title = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 24)
-        font_currency = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 48)
-        font_body = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 18)
-        font_small = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 14)
+        font_title = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 26)
+        font_currency = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 52)
+        font_body = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 20)
+        font_small = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 16)
     except:
         font_title = ImageFont.load_default()
         font_currency = ImageFont.load_default()
@@ -255,28 +260,28 @@ def generate_rate_card(currency_code: str) -> Optional[bytes]:
 
     # 標題
     icon = CURRENCY_ICONS.get(currency_code, "💱")
-    draw.text((20, 20), f"{icon} {currency_code}/TWD", fill='white', font=font_title)
-    draw.text((20, 55), f"更新日期: {r['date']}", fill='#888888', font=font_small)
+    draw.text((25, 25), f"{icon} {currency_code}/TWD", fill='white', font=font_title)
+    draw.text((25, 60), f"更新日期: {r['date']}", fill='#888888', font=font_small)
 
     # 匯率數字
     rate_text = f"{r['spot_sell']:.4f}"
-    draw.text((20, 90), rate_text, fill='white', font=font_currency)
-    draw.text((20 + len(rate_text) * 14, 100), "TWD", fill='#888888', font=font_body)
+    draw.text((25, 100), rate_text, fill='white', font=font_currency)
+    draw.text((25 + len(rate_text) * 16, 112), "TWD", fill='#888888', font=font_body)
 
     # 漲跌幅
     if t["change_pct"] is not None:
         change_text = f"{t['change_pct']:+.2f}%"
         change_color = '#10b981' if t["change_pct"] > 0 else '#ef4444'
-        draw.text((20, 150), change_text, fill=change_color, font=font_body)
+        draw.text((25, 170), change_text, fill=change_color, font=font_body)
 
     # 情緒標籤
     mood_color = '#10b981' if result["score"] > 0 else ('#ef4444' if result["score"] < 0 else '#f59e0b')
-    draw.text((20, 185), result["mood"], fill=mood_color, font=font_body)
+    draw.text((25, 210), result["mood"], fill=mood_color, font=font_body)
 
     # 技術指標
     if t["rsi"]:
         rsi_color = '#ef4444' if t["rsi"] > 70 else ('#10b981' if t["rsi"] < 30 else '#f59e0b')
-        draw.text((20, 220), f"RSI: {t['rsi']:.1f}", fill=rsi_color, font=font_small)
+        draw.text((25, 250), f"RSI: {t['rsi']:.1f}", fill=rsi_color, font=font_small)
 
     # 轉為 bytes
     buf = io.BytesIO()
@@ -336,7 +341,7 @@ def handle_query(text: str) -> tuple[str, Optional[bytes]]:
 
     # 指令處理
     if text.lower() in ["/help", "說明", "幫助", "help"]:
-        return """📋 可使用的指令：
+        help_msg = """📋 可使用的指令：
 
 💰 匯率查詢：
   • 輸入幣別代碼（如 USD、JPY）
@@ -354,10 +359,11 @@ def handle_query(text: str) -> tuple[str, Optional[bytes]]:
 ❓ 說明：
   • 輸入「說明」或「/help」查看此訊息
 
-⚠️ 免責聲明：以上資料僅供參考，不構成投資建議。""", None
+⚠️ 免責聲明：以上資料僅供參考，不構成投資建議。"""
+        return help_msg, None
 
     if text.lower() in ["/rates", "匯率", "匯率報價"]:
-        major_codes = ["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD"]
+        major_codes = MAJOR_CURRENCIES
         lines = ["💱 主要貨幣匯率報價\n"]
         for code in major_codes:
             result = analyze_currency(code)
@@ -385,6 +391,6 @@ def handle_query(text: str) -> tuple[str, Optional[bytes]]:
 
     # 搜尋最強勢幣別
     if "strongest" in text.lower() or "最強" in text:
-        return format_multi_rates(["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "HKD", "SGD"]), None
+        return format_multi_rates(MAJOR_CURRENCIES), None
 
     return f"⚠️ 無法識別指令：{text}\n請輸入「說明」查看可用指令", None
