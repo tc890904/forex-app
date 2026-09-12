@@ -22,7 +22,7 @@ from flask import Flask, request, jsonify
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import MessageEvent
-from linebot.v3.models import TextSendMessage, QuickReply, QuickReplyButton, MessageAction
+from linebot.v3.webhooks.models import TextSendMessage, QuickReply, QuickReplyButton, MessageAction
 from linebot import LineBotApi
 
 from bot_core import handle_query
