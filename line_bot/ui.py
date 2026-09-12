@@ -1,17 +1,13 @@
 """
-LINE Bot UI — Flex Message 與圖卡視覺系統
+LINE Bot UI — Flex Message 視覺系統
 
 視覺方向：FOREX DESK（深松綠 × 紙白）
-避免紫色漸層、奶油襯線、報紙排版。
 """
 
 from __future__ import annotations
 
-import io
-from pathlib import Path
 from typing import Any, Optional
 
-from PIL import Image, ImageDraw, ImageFont
 from linebot.v3.messaging import (
     FlexBlockStyle,
     FlexBox,
@@ -387,113 +383,3 @@ def to_flex_message(contents: Any, alt_text: str, quick_reply: bool = True) -> F
         contents=contents,
         quick_reply=default_quick_reply() if quick_reply else None,
     )
-
-
-# ── PNG 圖卡（可選，需 HTTPS）────────────────────────────
-
-
-def _load_fonts() -> tuple:
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/Library/Fonts/Arial Unicode.ttf",
-    ]
-    bold = regular = None
-    for path in candidates:
-        if not Path(path).exists():
-            continue
-        try:
-            if bold is None and ("Bold" in path or "Helvetica" in path):
-                bold = path
-            if regular is None:
-                regular = path
-        except OSError:
-            continue
-    if not regular:
-        d = ImageFont.load_default()
-        return d, d, d, d
-    try:
-        bpath = bold or regular
-        return (
-            ImageFont.truetype(bpath, 22),
-            ImageFont.truetype(bpath, 64),
-            ImageFont.truetype(regular, 24),
-            ImageFont.truetype(regular, 16),
-        )
-    except OSError:
-        d = ImageFont.load_default()
-        return d, d, d, d
-
-
-def generate_rate_card_image(result: dict, currency_name: str) -> Optional[bytes]:
-    """重繪匯率圖卡：紙白底 + 左側松綠色帶。"""
-    if "error" in result:
-        return None
-
-    r = result["rate"]
-    t = result["tech"]
-    code = r["currency"]
-    change = t.get("change_pct")
-
-    w, h = 720, 420
-    img = Image.new("RGB", (w, h), color=PAPER)
-    draw = ImageDraw.Draw(img)
-
-    draw.rectangle([0, 0, 12, h], fill=ACCENT)
-    draw.rectangle([12, 0, w, 72], fill=HEADER_BG)
-
-    font_brand, font_rate, font_body, font_small = _load_fonts()
-
-    draw.text((36, 22), BRAND, fill=ACCENT_SOFT, font=font_small)
-    draw.text((36, 42), f"{code} / TWD", fill=WHITE, font=font_brand)
-
-    subtitle = currency_name if currency_name else code
-    draw.text((36, 100), subtitle, fill=MUTED, font=font_small)
-
-    rate_text = f"{r['spot_sell']:.4f}"
-    draw.text((36, 128), rate_text, fill=INK, font=font_rate)
-    # 用實際字寬對齊 TWD，避免重疊
-    try:
-        bbox = draw.textbbox((36, 128), rate_text, font=font_rate)
-        twd_x = bbox[2] + 16
-    except Exception:
-        twd_x = 36 + len(rate_text) * 36
-    draw.text((twd_x, 168), "TWD", fill=MUTED, font=font_body)
-
-    y = 230
-    if change is not None:
-        col = UP if change > 0 else (DOWN if change < 0 else NEUTRAL)
-        draw.text((36, y), f"{change:+.2f}%", fill=col, font=font_body)
-        y += 42
-
-    mood_col = _mood_color(result.get("score", 0))
-    # mood 色塊
-    mood = result["mood"]
-    try:
-        mb = draw.textbbox((0, 0), mood, font=font_body)
-        mw, mh = mb[2] - mb[0] + 24, mb[3] - mb[1] + 14
-    except Exception:
-        mw, mh = 140, 36
-    draw.rounded_rectangle([36, y, 36 + mw, y + mh], radius=8, fill=mood_col)
-    draw.text((48, y + 6), mood, fill=WHITE, font=font_small)
-    y += mh + 28
-
-    draw.line([(36, y), (w - 36, y)], fill=LINE, width=1)
-    y += 18
-    metrics = []
-    if t.get("rsi") is not None:
-        metrics.append(f"RSI {t['rsi']:.1f}")
-    if t.get("ma20") and t.get("ma50"):
-        metrics.append(f"MA20 {t['ma20']:.4f}")
-    metrics.append(r.get("date", ""))
-    draw.text((36, y), "  ·  ".join(m for m in metrics if m), fill=MUTED, font=font_small)
-    draw.text((36, h - 36), DISCLAIMER, fill=ACCENT_SOFT, font=font_small)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    return buf.getvalue()

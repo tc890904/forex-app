@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LINE Bot UI / 功能測試"""
+"""LINE Bot Flex UI 測試（無圖卡）"""
 import os
 import sys
 
@@ -9,12 +9,13 @@ from bot_core import BotReply, handle_query
 from ui import to_flex_message
 
 print("=" * 50)
-print("FOREX DESK — UI / 功能測試")
+print("FOREX DESK — Flex-only 測試")
 print("=" * 50)
 
 cases = [
     ("USD", "美元"),
     ("匯率", "市場速覽"),
+    ("貨幣", "貨幣別名"),
     ("說明", "說明選單"),
     ("分析 日圓", "分析"),
     ("", "空輸入輪播"),
@@ -29,14 +30,13 @@ for query, desc in cases:
         reply = handle_query(query)
         assert isinstance(reply, BotReply)
         assert reply.flex is not None, "必須有 Flex"
-        assert reply.alt_text, "必須有 alt_text"
+        assert not hasattr(reply, "image_bytes") or getattr(reply, "image_bytes", None) is None
         msg = to_flex_message(reply.flex, reply.alt_text)
         payload = msg.to_dict()
         assert payload["type"] == "flex"
         print(f"alt: {reply.alt_text}")
         print(f"flex type: {payload['contents']['type']}")
-        print(f"image: {'yes' if reply.image_bytes else 'no'}")
-        print(f"fallback: {reply.text_fallback[:80]}...")
+        print(f"fallback: {reply.text_fallback[:80]}")
     except Exception as e:
         failed += 1
         print(f"FAIL: {e}")
@@ -45,4 +45,4 @@ print("\n" + "=" * 50)
 if failed:
     print(f"失敗 {failed} 項")
     sys.exit(1)
-print("全部通過")
+print("全部通過（僅 Flex，無圖卡）")

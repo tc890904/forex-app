@@ -1,7 +1,7 @@
 """
 LINE Bot Webhook Server
 
-純 LINE Bot SDK v3：WebhookHandler + MessagingApi + Flex UI。
+純 LINE Bot SDK v3：WebhookHandler + MessagingApi + Flex UI（無圖卡）。
 """
 
 from __future__ import annotations
@@ -10,12 +10,10 @@ import logging
 import os
 import sys
 import traceback
-import uuid
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request
 
 _BOT_DIR = Path(__file__).resolve().parent
 load_dotenv(_BOT_DIR / ".env")
@@ -28,7 +26,6 @@ from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
-    ImageMessage,
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
@@ -46,10 +43,7 @@ logger = logging.getLogger(__name__)
 
 LINE_TEXT_MAX_LEN = 5000
 
-app = Flask(__name__, static_folder="static")
-
-IMAGE_DIR = _BOT_DIR / "static" / "images"
-IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = (os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or "").strip()
 LINE_CHANNEL_SECRET = (os.getenv("LINE_CHANNEL_SECRET") or "").strip()
@@ -76,17 +70,6 @@ def _truncate_text(text: str) -> str:
     return text[: LINE_TEXT_MAX_LEN - 20] + "\n…(內容過長已截斷)"
 
 
-def save_image_to_disk(image_bytes: bytes, filename: str | None = None) -> str:
-    if filename is None:
-        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise ValueError("invalid image filename")
-    filepath = IMAGE_DIR / filename
-    with open(filepath, "wb") as f:
-        f.write(image_bytes)
-    return f"{SERVER_BASE_URL}/static/images/{filename}"
-
-
 def _reply(reply_token: str, messages: list) -> None:
     with ApiClient(configuration) as api_client:
         messaging_api = MessagingApi(api_client)
@@ -96,46 +79,17 @@ def _reply(reply_token: str, messages: list) -> None:
 
 
 def _build_messages(reply: BotReply) -> list:
-    """Flex 為主；HTTPS 時附加圖卡；最後一則帶 Quick Reply。"""
-    messages: list = []
-
-    if reply.image_bytes:
-        try:
-            image_url = save_image_to_disk(reply.image_bytes)
-            logger.info("圖片已保存: %s", image_url)
-            if image_url.startswith("https://"):
-                messages.append(
-                    ImageMessage(
-                        original_content_url=image_url,
-                        preview_image_url=image_url,
-                    )
-                )
-            else:
-                logger.info("本機非 HTTPS，略過 ImageMessage（Flex 仍會送出）")
-        except Exception:
-            logger.exception("保存圖片時出錯")
-
+    """只送 Flex 分析卡（含 Quick Reply）。"""
     if reply.flex is not None:
-        messages.append(
+        return [
             to_flex_message(reply.flex, reply.alt_text or "FOREX DESK", quick_reply=True)
+        ]
+    return [
+        TextMessage(
+            text=_truncate_text(reply.text_fallback or "（無內容）"),
+            quick_reply=default_quick_reply(),
         )
-    else:
-        messages.append(
-            TextMessage(
-                text=_truncate_text(reply.text_fallback or "（無內容）"),
-                quick_reply=default_quick_reply(),
-            )
-        )
-
-    return messages
-
-
-@app.route("/static/images/<path:filename>")
-def serve_image(filename: str):
-    safe_name = Path(filename).name
-    if safe_name != filename or ".." in filename:
-        return jsonify({"error": "invalid filename"}), 400
-    return send_from_directory(IMAGE_DIR, safe_name)
+    ]
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -146,13 +100,11 @@ def handle_message(event: MessageEvent) -> None:
 
         reply = handle_query(user_text)
         if not isinstance(reply, BotReply):
-            # 向後相容：舊 tuple
             if isinstance(reply, tuple):
                 reply = BotReply(
                     alt_text=str(reply[0])[:40],
                     flex=None,
                     text_fallback=str(reply[0]),
-                    image_bytes=reply[1] if len(reply) > 1 else None,
                 )
             else:
                 reply = BotReply(
@@ -207,11 +159,10 @@ def health():
         {
             "status": "healthy",
             "service": "forex-line-bot",
-            "ui": "flex-v1",
+            "ui": "flex-only",
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
             "server_base_url": SERVER_BASE_URL,
-            "images_dir": str(IMAGE_DIR),
         }
     )
 
@@ -245,10 +196,6 @@ def test():
     text = data["text"]
     try:
         reply = handle_query(text)
-        image_url = None
-        if reply.image_bytes:
-            image_url = save_image_to_disk(reply.image_bytes)
-
         flex_dict = None
         if reply.flex is not None:
             flex_dict = to_flex_message(reply.flex, reply.alt_text).to_dict()
@@ -258,9 +205,8 @@ def test():
                 "original": text,
                 "alt_text": reply.alt_text,
                 "reply": reply.text_fallback,
-                "image_url": image_url,
-                "has_image": reply.image_bytes is not None,
                 "has_flex": reply.flex is not None,
+                "has_image": False,
                 "flex": flex_dict,
                 "success": True,
             }

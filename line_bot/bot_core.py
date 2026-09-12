@@ -21,7 +21,6 @@ from ui import (
     build_hint_carousel,
     build_market_flex,
     build_rate_flex,
-    generate_rate_card_image,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -115,12 +114,11 @@ _CACHE_TTL_SEC = 60.0
 
 @dataclass
 class BotReply:
-    """統一回覆結構：Flex 為主、文字備援、圖卡可選。"""
+    """統一回覆結構：僅 Flex 分析卡 + 文字備援。"""
 
     alt_text: str
     flex: Any
     text_fallback: str
-    image_bytes: Optional[bytes] = None
 
 
 def _cache_get(key: str) -> Optional[list[dict]]:
@@ -318,7 +316,7 @@ def _collect_market(codes: list[str]) -> dict[str, dict]:
     return results
 
 
-def _reply_currency(code: str, with_image: bool = True) -> BotReply:
+def _reply_currency(code: str) -> BotReply:
     name = CURRENCY_NAMES.get(code, code)
     result = analyze_currency(code)
     if "error" in result:
@@ -327,13 +325,11 @@ def _reply_currency(code: str, with_image: bool = True) -> BotReply:
             flex=build_error_flex("查無資料", result["error"]),
             text_fallback=result["error"],
         )
-    image = generate_rate_card_image(result, name) if with_image else None
     alt = f"{code} {result['rate']['spot_sell']:.4f} {result['mood']}"
     return BotReply(
         alt_text=alt,
         flex=build_rate_flex(result, name),
         text_fallback=_rate_text_fallback(result, name),
-        image_bytes=image,
     )
 
 
@@ -379,7 +375,7 @@ def handle_query(text: str) -> BotReply:
         query = text[2:].strip() if text.lower().startswith("分析") else text[7:].strip()
         code = resolve_currency(query)
         if code and code != "TWD":
-            return _reply_currency(code, with_image=True)
+            return _reply_currency(code)
         return BotReply(
             alt_text="無法識別幣別",
             flex=build_error_flex("無法識別", "請改輸入代碼，例如：分析 USD"),
@@ -397,7 +393,7 @@ def handle_query(text: str) -> BotReply:
                 ),
                 text_fallback="台幣為基準貨幣，請查詢其他幣別。",
             )
-        return _reply_currency(code, with_image=True)
+        return _reply_currency(code)
 
     return BotReply(
         alt_text="無法識別指令",
