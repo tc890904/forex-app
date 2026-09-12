@@ -1,19 +1,23 @@
 """
-LINE Bot — 外匯行情查詢機器人
+LINE Bot — 外匯行情查詢機器人 (優化版)
 
 支援功能：
   - 即時匯率查詢（輸入幣別代碼或中文名）
   - 技術指標分析（RSI、MACD、MA 趨勢）
+  - 圖卡生成（匯率卡片）
   - 貨幣強弱排名
+  - 快速按鈕選擇
   - 快速指令（/rates, /help）
 """
 
 from datetime import datetime, timedelta
+import io
 import logging
 from typing import Optional
 
 import pandas as pd
 import requests
+from PIL import Image, ImageDraw, ImageFont
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,8 +38,24 @@ CURRENCY_ALIASES: dict[str, str] = {
     "港幣": "HKD", "新加坡幣": "SGD", "紐幣": "NZD", "瑞典克朗": "SEK",
     "南非幣": "ZAR", "泰銖": "THB", "菲律賓披索": "PHP", "印尼盾": "IDR",
     "韓元": "KRW", "越南盾": "VND", "馬來幣": "MYR",
-    # 其他常見輸入
-    "美金": "USD", "台幣": "TWD",
+}
+
+# 貨幣圖標 emoji
+CURRENCY_ICONS = {
+    "USD": "💵", "JPY": "💴", "EUR": "💶", "GBP": "💷",
+    "AUD": "🇦🇺", "CAD": "🇨🇦", "CHF": "🇨🇭", "CNY": "🇨🇳",
+    "HKD": "🇭🇰", "SGD": "🇸🇬", "NZD": "🇳🇿", "SEK": "🇸🇪",
+    "ZAR": "🇿🇦", "THB": "🇹🇭", "PHP": "🇵🇭", "IDR": "🇮🇩",
+    "KRW": "🇰🇷", "VND": "🇻🇳", "MYR": "🇲🇾",
+}
+
+# 幣別中文名
+CURRENCY_NAMES = {
+    "USD": "美元", "JPY": "日圓", "EUR": "歐元", "GBP": "英鎊",
+    "AUD": "澳幣", "CAD": "加幣", "CHF": "瑞士法郎", "CNY": "人民幣",
+    "HKD": "港幣", "SGD": "新加坡幣", "NZD": "紐幣", "SEK": "瑞典克朗",
+    "ZAR": "南非幣", "THB": "泰銖", "PHP": "菲律賓披索", "IDR": "印尼盾",
+    "KRW": "韓元", "VND": "越南盾", "MYR": "馬來幣",
 }
 
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
@@ -72,7 +92,6 @@ def resolve_currency(query: str) -> Optional[str]:
     q = query.strip().upper()
     if q in CURRENCY_ALIASES:
         return CURRENCY_ALIASES[q]
-    # 嘗試中文匹配
     for alias, code in CURRENCY_ALIASES.items():
         if query.lower() in alias.lower() or alias.lower() in query.lower():
             return code
@@ -105,7 +124,6 @@ def calc_technical_indicators(currency_code: str) -> Optional[dict]:
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
 
-    # 使用 spot_sell 作為收盤價
     close_col = "spot_sell" if "spot_sell" in df.columns else "cash_sell"
     if close_col not in df.columns:
         return None
@@ -209,6 +227,64 @@ def analyze_currency(currency_code: str) -> dict:
     }
 
 
+def generate_rate_card(currency_code: str) -> Optional[bytes]:
+    """生成匯率圖卡圖片。"""
+    result = analyze_currency(currency_code)
+    if "error" in result:
+        return None
+
+    r = result["rate"]
+    t = result["tech"]
+
+    # 建立圖片
+    width, height = 400, 280
+    img = Image.new('RGB', (width, height), color='#1a1a2e')
+    draw = ImageDraw.Draw(img)
+
+    # 嘗試載入字體
+    try:
+        font_title = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 24)
+        font_currency = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 48)
+        font_body = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 18)
+        font_small = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 14)
+    except:
+        font_title = ImageFont.load_default()
+        font_currency = ImageFont.load_default()
+        font_body = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
+    # 標題
+    icon = CURRENCY_ICONS.get(currency_code, "💱")
+    draw.text((20, 20), f"{icon} {currency_code}/TWD", fill='white', font=font_title)
+    draw.text((20, 55), f"更新日期: {r['date']}", fill='#888888', font=font_small)
+
+    # 匯率數字
+    rate_text = f"{r['spot_sell']:.4f}"
+    draw.text((20, 90), rate_text, fill='white', font=font_currency)
+    draw.text((20 + len(rate_text) * 14, 100), "TWD", fill='#888888', font=font_body)
+
+    # 漲跌幅
+    if t["change_pct"] is not None:
+        change_text = f"{t['change_pct']:+.2f}%"
+        change_color = '#10b981' if t["change_pct"] > 0 else '#ef4444'
+        draw.text((20, 150), change_text, fill=change_color, font=font_body)
+
+    # 情緒標籤
+    mood_color = '#10b981' if result["score"] > 0 else ('#ef4444' if result["score"] < 0 else '#f59e0b')
+    draw.text((20, 185), result["mood"], fill=mood_color, font=font_body)
+
+    # 技術指標
+    if t["rsi"]:
+        rsi_color = '#ef4444' if t["rsi"] > 70 else ('#10b981' if t["rsi"] < 30 else '#f59e0b')
+        draw.text((20, 220), f"RSI: {t['rsi']:.1f}", fill=rsi_color, font=font_small)
+
+    # 轉為 bytes
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def format_rate_message(result: dict) -> str:
     """格式化匯率訊息。"""
     if "error" in result:
@@ -245,8 +321,8 @@ def format_rate_message(result: dict) -> str:
 
 def format_multi_rates(codes: list[str]) -> str:
     """格式化多幣別匯率比較。"""
-    lines = ["💱 多幣別匯率比較\n"]
-    for code in codes[:10]:  # 最多顯示 10 個
+    lines = ["💱 主要貨幣匯率速覽\n"]
+    for code in codes[:10]:
         result = analyze_currency(code)
         if "error" not in result:
             r = result["rate"]
@@ -254,8 +330,8 @@ def format_multi_rates(codes: list[str]) -> str:
     return "\n".join(lines)
 
 
-def handle_query(text: str) -> str:
-    """處理用戶輸入，回傳回覆訊息。"""
+def handle_query(text: str) -> tuple[str, Optional[bytes]]:
+    """處理用戶輸入，回傳回覆訊息和圖片（可選）。"""
     text = text.strip()
 
     # 指令處理
@@ -278,10 +354,9 @@ def handle_query(text: str) -> str:
 ❓ 說明：
   • 輸入「說明」或「/help」查看此訊息
 
-⚠️ 免責聲明：以上資料僅供參考，不構成投資建議。"""
+⚠️ 免責聲明：以上資料僅供參考，不構成投資建議。""", None
 
     if text.lower() in ["/rates", "匯率", "匯率報價"]:
-        # 主要貨幣匯率
         major_codes = ["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD"]
         lines = ["💱 主要貨幣匯率報價\n"]
         for code in major_codes:
@@ -289,23 +364,27 @@ def handle_query(text: str) -> str:
             if "error" not in result:
                 r = result["rate"]
                 lines.append(f"{code}: {r['spot_sell']:.4f} {result['mood']}")
-        return "\n".join(lines)
+        return "\n".join(lines), None
 
     # 分析指令
     if text.lower().startswith("分析"):
         query = text[2:].strip()
         code = resolve_currency(query)
         if code:
-            return format_rate_message(analyze_currency(code))
-        return f"⚠️ 無法識別幣別：{query}\n請輸入正確的幣別代碼或中文名稱"
+            result = analyze_currency(code)
+            card = generate_rate_card(code)
+            return format_rate_message(result), card
+        return f"⚠️ 無法識別幣別：{query}\n請輸入正確的幣別代碼或中文名稱", None
 
     # 一般查詢
     code = resolve_currency(text)
     if code:
-        return format_rate_message(analyze_currency(code))
+        result = analyze_currency(code)
+        card = generate_rate_card(code)
+        return format_rate_message(result), card
 
     # 搜尋最強勢幣別
     if "strongest" in text.lower() or "最強" in text:
-        return format_multi_rates(["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "HKD", "SGD"])
+        return format_multi_rates(["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "HKD", "SGD"]), None
 
-    return f"⚠️ 無法識別指令：{text}\n請輸入「說明」查看可用指令"
+    return f"⚠️ 無法識別指令：{text}\n請輸入「說明」查看可用指令", None
