@@ -1,0 +1,16 @@
+build:
+  steps:
+    - pip install streamlit plotly pandas numpy requests
+
+services:
+  - type: web
+    name: forex-app
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.headless true
+
+envVars:
+  - key: STREAMLIT_SERVER_PORT
+    value: 8501

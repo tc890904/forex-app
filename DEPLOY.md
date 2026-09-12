@@ -1,23 +1,23 @@
-# 部署流程
+# Deploy Guide - Forex App
 
-## 1. 建立 GitHub 儲存庫
-
-請手動操作：
+## 步驟一：初始化 Git Repository
 
 ```bash
-# 在專案根目錄執行
 cd /Users/a000/Downloads/forex_app
-
-# 建立 .gitignore（已排除 .env）
-echo ".env" >> .gitignore
-
-# 初始化 git（若尚未初始化）
 git init
 git add .
-git commit -m "Initial commit: Forex App + LINE Bot"
+git commit -m "Initial commit: Forex App with LINE Bot support"
 ```
 
-然後在 [GitHub.com](https://github.com/new) 建立新儲存庫，複製 push 指令：
+## 步驟二：創建 GitHub Repository
+
+1. 前往 https://github.com/new
+2. Repository name: `forex-app`
+3. 選擇 Public 或 Private
+4. 不要勾選 "Initialize this repository with a README"
+5. 點擊 Create repository
+
+## 步驟三：推送代碼到 GitHub
 
 ```bash
 git remote add origin https://github.com/YOUR_USERNAME/forex-app.git
@@ -25,60 +25,44 @@ git branch -M main
 git push -u origin main
 ```
 
----
+## 步驟四：部署到 Render
 
-## 2. 取得 Webhook URL
+1. 登入 https://render.com
+2. 點擊 **New** → **Web Service**
+3. 選擇剛才建立的 GitHub repository
+4. 設定如下：
+   - **Name**: `forex-line-bot`
+   - **Environment**: `Python 3`
+   - **Build Command**: `pip install -r line_bot/requirements.txt`
+   - **Start Command**: `python line_bot/server.py`
+   - **Instance Type**: `Free`
+5. 在 **Environment Variables** 加入：
+   - `LINE_CHANNEL_ACCESS_TOKEN`: `t/OS62lcL0egB4KgzOiqZR2N5ac0JTfWVWKQVGHQwG5sVOPSyDmemNyhFzaVf++9Kkk3Yefn3mMto6gaq4jumE1xYdSGxNaiN+R1CXDVEq73YxNB6cy31yRDenfgSon4yKKTmUMghk70fLnD0lSnFgdB04t89/1O/w1cDnyilFU=`
+   - `LINE_CHANNEL_SECRET`: `3e97eecf5087595874c51eca8fc4b4eb`
+6. 點擊 **Create Web Service**
 
-### 方法 A：使用 ngrok（本地測試）
+## 步驟五：取得 Webhook URL
 
-```bash
-# 安裝 ngrok
-brew install ngrok
-
-# 啟動 ngrok（會建立 HTTPS tunnel）
-ngrok http 8080
-
-# 複製 ngrok 提供的 HTTPS URL，例如：
-# https://abc123.ngrok.io
+部署完成後，Render 會提供一個 URL，格式為：
+```
+https://forex-line-bot-xxxx.onrender.com
 ```
 
-然後在 LINE Developers Console 設定：
-- Webhook URL: `https://abc123.ngrok.io/webhook`
-- 啟用 Webhook 使用
+將此 URL 加上 `/webhook` 後貼到 LINE Developers Console：
+```
+https://forex-line-bot-xxxx.onrender.com/webhook
+```
 
-### 方法 B：使用 Render/Railway（正式部署）
-
-**Render.com**（免費方案）：
-1. 註冊 https://render.com
-2. 建立新 Web Service
-3. 選擇 GitHub 儲存庫
-4. 設定環境變數：
-   - `LINE_CHANNEL_ACCESS_TOKEN`
-   - `LINE_CHANNEL_SECRET`
-5. 啟動後取得 URL：`https://your-bot.onrender.com`
-
----
-
-## 3. 驗證 Bot 運作
+## 測試
 
 ```bash
-# 測試本地 API
+# 本地測試
 curl -X POST http://localhost:8080/test \
   -H "Content-Type: application/json" \
   -d '{"text": "USD"}'
 
-# 應該回覆匯率資訊
+# 測試 webhook endpoint
+curl -X POST https://your-app.onrender.com/webhook \
+  -H "Content-Type: application/json" \
+  -d '{"type": "message", "message": {"text": "USD"}}'
 ```
-
----
-
-## 4. 設定 LINE Developers Console
-
-1. 進入 [LINE Developers Console](https://developers.line.biz/console/)
-2. 選擇您的 Channel
-3. 進入 **Messaging settings**
-4. 啟用 **Use webhook**
-5. 輸入 Webhook URL
-6. 儲存設定
-
-現在可以在 LINE 中測試 Bot 了！

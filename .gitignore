@@ -19,13 +19,11 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
-# Virtual Environment
 venv/
 env/
 ENV/
 
-# Environment Variables (包含敏感憑證)
+# Environment Variables
 .env
 .env.local
 .env.*.local
@@ -45,6 +43,10 @@ Thumbs.db
 *.log
 logs/
 
-# ngrok
-.ngrok*
-ngrok*.log
+# Node
+node_modules/
+npm-debug.log
+
+# Test
+coverage/
+.pytest_cache/
