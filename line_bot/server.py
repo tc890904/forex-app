@@ -201,7 +201,7 @@ def health():
         {
             "status": "healthy",
             "service": "forex-line-bot",
-            "ui": "flex-kline",
+            "ui": "flex-full",
             "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "secret_set": bool(LINE_CHANNEL_SECRET),
             "server_base_url": SERVER_BASE_URL,

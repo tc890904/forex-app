@@ -18,12 +18,30 @@ import pandas as pd
 import requests
 
 from charts import generate_kline_png
+from analytics import (
+    calc_atr_stops,
+    calc_kelly,
+    calc_leverage,
+    correlation_matrix,
+    records_to_df,
+    score_signals,
+    simple_ma_backtest,
+    strength_ranking,
+)
 from ui import (
+    build_atr_flex,
+    build_backtest_flex,
+    build_corr_flex,
     build_error_flex,
     build_help_flex,
     build_hint_carousel,
+    build_kelly_flex,
+    build_leverage_flex,
     build_market_flex,
+    build_ranking_flex,
     build_rate_flex,
+    build_sentiment_flex,
+    build_signals_flex,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -323,6 +341,7 @@ def analyze_currency(currency_code: str) -> dict:
         "signals": signals,
         "score": score,
         "records": records,
+        "signal_detail": score_signals(records_to_df(records)),
     }
 
 
@@ -400,6 +419,217 @@ def _reply_market() -> BotReply:
     )
 
 
+def _reply_ranking() -> BotReply:
+    results = _collect_market(MAJOR_CURRENCIES)
+    rows = strength_ranking(results)
+    if not rows:
+        return BotReply(
+            alt_text="強弱排行暫無資料",
+            flex=build_error_flex("暫無資料", "無法計算漲跌排行，請稍後再試。"),
+            text_fallback="強弱排行暫無資料",
+        )
+    lines = [f"{r['code']} {r['change_pct']:+.2f}%" for r in rows]
+    return BotReply(
+        alt_text="強弱排行",
+        flex=build_ranking_flex(rows),
+        text_fallback="\n".join(lines),
+    )
+
+
+def _reply_signals_compare() -> BotReply:
+    results = _collect_market(MAJOR_CURRENCIES)
+    rows = []
+    for code in MAJOR_CURRENCIES:
+        r = results.get(code)
+        if not r or "error" in r:
+            continue
+        detail = r.get("signal_detail") or score_signals(records_to_df(r.get("records") or []))
+        if not detail:
+            continue
+        rows.append(
+            {
+                "code": code,
+                "name": CURRENCY_NAMES.get(code, ""),
+                "total_score": detail["total_score"],
+                "mood": detail["mood"],
+            }
+        )
+    rows.sort(key=lambda x: x["total_score"], reverse=True)
+    if not rows:
+        return BotReply(
+            alt_text="訊號暫無資料",
+            flex=build_error_flex("暫無資料", "無法計算訊號比較。"),
+            text_fallback="訊號暫無資料",
+        )
+    return BotReply(
+        alt_text="訊號比較",
+        flex=build_signals_flex(rows),
+        text_fallback="\n".join(f"{x['code']} {x['mood']} ({x['total_score']:+d})" for x in rows),
+    )
+
+
+def _reply_atr(code: str, direction: str = "long") -> BotReply:
+    name = CURRENCY_NAMES.get(code, code)
+    result = analyze_currency(code)
+    if "error" in result:
+        return BotReply(
+            alt_text="停損計算失敗",
+            flex=build_error_flex("查無資料", result["error"]),
+            text_fallback=result["error"],
+        )
+    detail = result.get("signal_detail") or {}
+    atr = detail.get("atr")
+    entry = result["rate"]["spot_sell"]
+    if not atr:
+        df = records_to_df(result.get("records") or [])
+        scored = score_signals(df)
+        atr = scored.get("atr") if scored else None
+    if not atr or not entry:
+        return BotReply(
+            alt_text="ATR 不足",
+            flex=build_error_flex("ATR 不足", f"{code} 無法計算 ATR 停損。"),
+            text_fallback="ATR 不足",
+        )
+    stops = calc_atr_stops(entry, atr, direction=direction)
+    return BotReply(
+        alt_text=f"{code} ATR 停損",
+        flex=build_atr_flex(code, name, stops),
+        text_fallback=f"{code} 停損 {stops['stop_loss']:.4f} 停利 {stops['take_profit']:.4f}",
+    )
+
+
+def _reply_kelly(parts: list[str]) -> BotReply:
+    # 凱利 [勝率] [盈虧比] [資金]
+    win_rate, payoff, capital = 0.55, 1.5, 10000.0
+    try:
+        if len(parts) >= 1:
+            win_rate = float(parts[0])
+            if win_rate > 1:
+                win_rate /= 100.0
+        if len(parts) >= 2:
+            payoff = float(parts[1])
+        if len(parts) >= 3:
+            capital = float(parts[2])
+    except ValueError:
+        pass
+    data = calc_kelly(win_rate, payoff, capital)
+    return BotReply(
+        alt_text="凱利倉位建議",
+        flex=build_kelly_flex(data),
+        text_fallback=f"半凱利 {data['half_kelly_pct']:.1f}% / {data['half_kelly_amount']:.0f}",
+    )
+
+
+def _reply_leverage(text: str) -> BotReply:
+    # 槓桿 [倍數] [幣別]
+    leverage = 10
+    code = "USD"
+    tokens = text.replace("槓桿", "").strip().split()
+    for tok in tokens:
+        if tok.isdigit():
+            leverage = int(tok)
+        else:
+            c = resolve_currency(tok)
+            if c and c != "TWD":
+                code = c
+    atr = None
+    price = None
+    result = analyze_currency(code)
+    if "error" not in result:
+        price = result["rate"]["spot_sell"]
+        detail = result.get("signal_detail") or {}
+        atr = detail.get("atr")
+    data = calc_leverage(10000.0, leverage, atr=atr, price=price)
+    return BotReply(
+        alt_text=f"槓桿風險 {leverage}x",
+        flex=build_leverage_flex(data),
+        text_fallback=f"槓桿 {leverage}x 風險{data['risk_level']}",
+    )
+
+
+def _reply_correlation() -> BotReply:
+    codes = MAJOR_CURRENCIES[:8]
+    series_map = {}
+    for code in codes:
+        records = _fetch_exchange_data(code, 120)
+        df = records_to_df(records)
+        if df.empty:
+            continue
+        col = "spot_sell" if df["spot_sell"].fillna(0).ne(0).sum() > 5 else "cash_sell"
+        s = df.set_index("date")[col].pct_change().dropna()
+        series_map[code] = s
+    corr = correlation_matrix(series_map)
+    if corr.empty:
+        return BotReply(
+            alt_text="相關不足",
+            flex=build_error_flex("相關不足", "無法計算貨幣相關矩陣。"),
+            text_fallback="相關不足",
+        )
+    matrix = {a: {b: float(corr.loc[a, b]) for b in corr.columns} for a in corr.index}
+    return BotReply(
+        alt_text="貨幣相關",
+        flex=build_corr_flex(matrix, list(corr.columns)),
+        text_fallback="貨幣相關矩陣已產生",
+    )
+
+
+def _reply_backtest(code: str) -> BotReply:
+    name = CURRENCY_NAMES.get(code, code)
+    records = _fetch_exchange_data(code, 400)
+    summary = simple_ma_backtest(records_to_df(records))
+    return BotReply(
+        alt_text=f"{code} 回測",
+        flex=build_backtest_flex(code, name, summary),
+        text_fallback=str(summary),
+    )
+
+
+def _reply_sentiment() -> BotReply:
+    results = _collect_market(MAJOR_CURRENCIES)
+    rows = []
+    for code in MAJOR_CURRENCIES:
+        r = results.get(code)
+        if not r or "error" in r:
+            continue
+        detail = r.get("signal_detail")
+        if not detail:
+            continue
+        # map score -3..3 style from total_score roughly
+        rows.append(
+            {
+                "code": code,
+                "score": detail["total_score"],
+                "text": detail["mood"],
+            }
+        )
+    if not rows:
+        return BotReply(
+            alt_text="情緒暫無資料",
+            flex=build_error_flex("暫無資料", "無法計算情緒總覽。"),
+            text_fallback="情緒暫無資料",
+        )
+    return BotReply(
+        alt_text="技術面情緒總覽",
+        flex=build_sentiment_flex(rows),
+        text_fallback="\n".join(f"{x['code']} {x['text']}" for x in rows),
+    )
+
+
+def _extract_currency_from_command(text: str, prefixes: tuple[str, ...]) -> Optional[str]:
+    t = text.strip()
+    lower = t.lower()
+    for p in prefixes:
+        if lower.startswith(p.lower()):
+            rest = t[len(p) :].strip()
+            # 停損空 USD
+            rest = rest.replace("空", " ").replace("多", " ").strip()
+            if not rest:
+                return "USD"
+            code = resolve_currency(rest.split()[0] if rest.split() else rest)
+            return code
+    return None
+
+
 def handle_query(text: str) -> BotReply:
     """處理用戶輸入，回傳 BotReply。"""
     schedule_daily_warm()
@@ -416,14 +646,56 @@ def handle_query(text: str) -> BotReply:
         return BotReply(
             alt_text="FOREX DESK 使用說明",
             flex=build_help_flex(),
-            text_fallback="輸入幣別代碼或中文名稱查詢匯率。輸入「匯率」查看市場速覽。",
+            text_fallback="輸入「說明」查看全部指令。",
         )
 
     if text.lower() in ["/rates", "匯率", "匯率報價", "貨幣", "市場", "速覽"]:
         return _reply_market()
 
+    if text.lower() in ["強弱", "最強", "最弱", "排行", "strongest"]:
+        return _reply_ranking()
+
+    if text.lower() in ["訊號", "信號", "signals", "比較"]:
+        return _reply_signals_compare()
+
+    if text.lower() in ["相關", "關聯", "corr", "correlation"]:
+        return _reply_correlation()
+
+    if text.lower() in ["情緒", "sentiment"]:
+        return _reply_sentiment()
+
+    if text.lower().startswith("凱利") or text.lower().startswith("kelly"):
+        raw = text.split(None, 1)
+        parts = raw[1].split() if len(raw) > 1 else []
+        return _reply_kelly(parts)
+
+    if text.lower().startswith("槓桿") or text.lower().startswith("leverage"):
+        return _reply_leverage(text)
+
+    # 停損 / ATR
+    if text.lower().startswith("停損") or text.lower().startswith("atr"):
+        direction = "short" if ("空" in text or "short" in text.lower()) else "long"
+        code = _extract_currency_from_command(text, ("停損空", "停損多", "停損", "atr"))
+        if code and code != "TWD":
+            return _reply_atr(code, direction=direction)
+        return BotReply(
+            alt_text="請指定幣別",
+            flex=build_error_flex("請指定幣別", "範例：停損 USD 或 停損空 JPY"),
+            text_fallback="請輸入：停損 USD",
+        )
+
+    if text.lower().startswith("回測") or text.lower().startswith("backtest"):
+        code = _extract_currency_from_command(text, ("回測", "backtest"))
+        if code and code != "TWD":
+            return _reply_backtest(code)
+        return BotReply(
+            alt_text="請指定幣別",
+            flex=build_error_flex("請指定幣別", "範例：回測 USD"),
+            text_fallback="請輸入：回測 USD",
+        )
+
     if "strongest" in text.lower() or "最強" in text:
-        return _reply_market()
+        return _reply_ranking()
 
     if text.lower().startswith("分析") or text.lower().startswith("analyze"):
         query = text[2:].strip() if text.lower().startswith("分析") else text[7:].strip()
@@ -453,7 +725,7 @@ def handle_query(text: str) -> BotReply:
         alt_text="無法識別指令",
         flex=build_error_flex(
             "無法識別",
-            f'找不到「{text}」。可點下方按鈕，或輸入 USD、美元、匯率、說明。',
+            f'找不到「{text}」。輸入「說明」查看匯率、訊號、停損、回測等指令。',
         ),
         text_fallback=f"無法識別：{text}。請輸入「說明」。",
     )
