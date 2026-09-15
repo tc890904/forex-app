@@ -2,7 +2,6 @@
 Telegram 專用 UI / UX
 
 HTML 格式訊息 + Inline / Reply Keyboard。
-（Telegram 不支援 LINE Flex，以結構化文字卡呈現。）
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ from bot_core import BotReply
 
 
 def _ikb(rows: list[list[tuple[str, str]]]) -> dict:
-    """InlineKeyboard：[(label, callback_data), ...]"""
     return {
         "inline_keyboard": [
             [{"text": lab, "callback_data": cb[:64]} for lab, cb in row]
@@ -26,7 +24,6 @@ def _ikb(rows: list[list[tuple[str, str]]]) -> dict:
 
 
 def _rkb(rows: list[list[str]], resize: bool = True) -> dict:
-    """ReplyKeyboard。"""
     return {
         "keyboard": [[{"text": t} for t in row] for row in rows],
         "resize_keyboard": resize,
@@ -38,7 +35,7 @@ def home_reply_keyboard() -> dict:
     return _rkb(
         [
             ["匯率", "強弱", "訊號"],
-            ["情緒", "相關", "說明"],
+            ["訂閱", "我的訂閱", "說明"],
             ["USD", "JPY", "EUR", "GBP"],
         ]
     )
@@ -48,7 +45,7 @@ def currency_inline(code: str) -> dict:
     return _ikb(
         [
             [("詳情", f"詳情 {code}"), ("停損", f"停損 {code}"), ("回測", f"回測 {code}")],
-            [("加入清單", f"加入 {code}"), ("市場", "匯率"), ("強弱", "強弱")],
+            [("加入清單", f"加入 {code}"), ("我的訂閱", "我的訂閱"), ("市場", "匯率")],
             [("USD", "USD"), ("JPY", "JPY"), ("EUR", "EUR"), ("說明", "說明")],
         ]
     )
@@ -59,7 +56,7 @@ def market_inline() -> dict:
         [
             [("USD", "USD"), ("JPY", "JPY"), ("EUR", "EUR"), ("GBP", "GBP")],
             [("強弱", "強弱"), ("訊號", "訊號"), ("情緒", "情緒")],
-            [("相關", "相關"), ("我的清單", "我的清單"), ("說明", "說明")],
+            [("訂閱", "訂閱"), ("我的訂閱", "我的訂閱"), ("說明", "說明")],
         ]
     )
 
@@ -78,8 +75,18 @@ def home_inline() -> dict:
     return _ikb(
         [
             [("匯率速覽", "匯率"), ("強弱排行", "強弱"), ("訊號比較", "訊號")],
+            [("訂閱推播", "訂閱"), ("我的訂閱", "我的訂閱"), ("推送測試", "推送測試")],
             [("USD", "USD"), ("JPY", "JPY"), ("EUR", "EUR")],
-            [("我的清單", "我的清單"), ("說明", "說明")],
+        ]
+    )
+
+
+def subscribe_inline() -> dict:
+    return _ikb(
+        [
+            [("推送測試", "推送測試"), ("我的訂閱", "我的訂閱")],
+            [("取消訂閱", "取消訂閱"), ("匯率", "匯率")],
+            [("監視 USD>32", "監視 USD > 32"), ("說明", "說明")],
         ]
     )
 
@@ -105,8 +112,11 @@ def format_welcome() -> str:
     return (
         "<b>FOREX DESK</b>\n"
         "台銀牌告 · 技術面速覽\n\n"
-        "直接輸入幣別代碼，例如 <code>USD</code>\n"
-        "或點下方按鈕開始。\n\n"
+        "輸入幣別如 <code>USD</code>，或點下方按鈕。\n\n"
+        "<b>自動推播</b>\n"
+        "· <code>訂閱</code> — 每日台北 09:00 匯率\n"
+        "· <code>監視 USD &gt; 32</code> — 價格觸發通知\n"
+        "· <code>推送測試</code> — 立即預覽推播內容\n\n"
         "<i>僅供參考，非投資建議。</i>"
     )
 
@@ -115,18 +125,26 @@ def format_help() -> str:
     return (
         "<b>指令一覽</b>\n\n"
         "<b>行情</b>\n"
-        "· 幣別代碼 → 匯率摘要＋K線\n"
-        "· <code>詳情</code> / <code>詳情 USD</code>\n"
-        "· <code>匯率</code> 市場速覽\n"
-        "· <code>強弱</code> <code>訊號</code> <code>情緒</code> <code>相關</code>\n\n"
+        "· 幣別代碼 → 摘要＋K線\n"
+        "· <code>詳情</code> <code>匯率</code> <code>強弱</code>\n"
+        "· <code>訊號</code> <code>情緒</code> <code>相關</code>\n\n"
         "<b>工具</b>\n"
-        "· <code>停損 USD</code> / <code>停損空 JPY</code>\n"
-        "· <code>回測 USD</code>\n"
+        "· <code>停損 USD</code> <code>回測 USD</code>\n"
         "· <code>凱利</code> <code>槓桿 10</code>\n\n"
         "<b>清單</b>\n"
-        "· <code>加入 USD</code> <code>移除 USD</code> <code>我的清單</code>\n\n"
+        "· <code>加入 USD</code> <code>我的清單</code>\n\n"
+        "<b>推播</b>\n"
+        "· <code>訂閱</code> / <code>取消訂閱</code>\n"
+        "· <code>監視 USD &gt; 32</code>\n"
+        "· <code>我的訂閱</code> <code>推送測試</code>\n\n"
         "<i>僅供參考，非投資建議。</i>"
     )
+
+
+def format_plain_card(title: str, body: str) -> str:
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    body_html = "\n".join(_esc(ln) for ln in lines)
+    return f"<b>{_esc(title)}</b>\n\n{body_html}\n\n<i>僅供參考，非投資建議。</i>"
 
 
 def format_rate_card(result: dict, name: str, detail: bool = False) -> str:
@@ -142,13 +160,12 @@ def format_rate_card(result: dict, name: str, detail: bool = False) -> str:
         f"{mood}",
         f"資料 {_esc(r.get('date', ''))}",
     ]
-    note_ch = t.get("change_pct")
     score = result.get("score", 0)
-    if note_ch is not None:
-        if note_ch > 0 and score < 0:
-            lines.append("⚠ 日線上漲，但中期技術面偏空")
-        elif note_ch < 0 and score > 0:
-            lines.append("⚠ 日線下跌，但中期技術面偏多")
+    if change is not None:
+        if change > 0 and score < 0:
+            lines.append("日線上漲，但中期技術面偏空")
+        elif change < 0 and score > 0:
+            lines.append("日線下跌，但中期技術面偏多")
 
     if detail:
         sb = f"{float(r.get('spot_buy') or 0):.4f}"
@@ -173,13 +190,22 @@ def format_rate_card(result: dict, name: str, detail: bool = False) -> str:
 
 
 def format_from_reply(reply: BotReply) -> str:
-    """依 BotReply 內容產出 HTML 訊息。"""
-    if getattr(reply, "kind", None) == "welcome":
+    kind = getattr(reply, "kind", None)
+    if kind == "welcome":
         return format_welcome()
-    if getattr(reply, "kind", None) == "help":
+    if kind == "help":
         return format_help()
+    if kind in ("subscribe", "alert", "subscriptions", "push_test"):
+        # push_test 的 text_fallback 已是 HTML
+        if kind == "push_test":
+            raw = (reply.text_fallback or "").strip()
+            if raw.startswith("<b>"):
+                return raw
+        return format_plain_card(
+            reply.alt_text or "FOREX DESK",
+            reply.text_fallback or "",
+        )
 
-    # 匯率卡（有結構化資料）
     if reply._rate_result and "error" not in reply._rate_result:
         return format_rate_card(
             reply._rate_result,
@@ -187,7 +213,6 @@ def format_from_reply(reply: BotReply) -> str:
             detail=(reply.card_mode == "detail"),
         )
 
-    # 其餘：美化 text_fallback（排行／市場等多行）
     raw = (reply.text_fallback or reply.alt_text or "").strip()
     if not raw:
         return "（無內容）"
@@ -195,13 +220,13 @@ def format_from_reply(reply: BotReply) -> str:
     title = _esc(reply.alt_text or "FOREX DESK")
     lines = raw.splitlines()
     if len(lines) > 1:
-        body_lines = lines[1:] if lines[0] == (reply.alt_text or "") or lines[0] in (
-            "市場速覽",
-            "清單：",
-        ) else lines
+        body_lines = (
+            lines[1:]
+            if lines[0] == (reply.alt_text or "") or lines[0] in ("市場速覽", "清單：")
+            else lines
+        )
         if lines[0].startswith("清單"):
             body_lines = lines
-        # 先截斷行數，避免 HTML 中途被切
         body_lines = [ln for ln in body_lines if ln.strip()][:40]
         formatted = "\n".join(f"<code>{_esc(ln)}</code>" for ln in body_lines)
         return f"<b>{title}</b>\n\n{formatted}\n\n<i>僅供參考，非投資建議。</i>"
@@ -213,6 +238,9 @@ def format_from_reply(reply: BotReply) -> str:
 
 
 def keyboard_for(reply: BotReply) -> dict:
+    kind = getattr(reply, "kind", None)
+    if kind in ("subscribe", "subscriptions", "alert", "push_test"):
+        return subscribe_inline()
     mode = reply.qr_mode or "home"
     code = reply.last_code or "USD"
     if mode == "currency":
@@ -225,11 +253,9 @@ def keyboard_for(reply: BotReply) -> dict:
 
 
 def _safe_html_truncate(text: str, limit: int = 3900) -> str:
-    """截斷時避免切斷 HTML 標籤。"""
     if len(text) <= limit:
         return text
     cut = text[:limit]
-    # 若有未閉合的 <… 則回退到最後一個完整 '>' 之後
     last_lt = cut.rfind("<")
     last_gt = cut.rfind(">")
     if last_lt > last_gt:
@@ -238,10 +264,6 @@ def _safe_html_truncate(text: str, limit: int = 3900) -> str:
 
 
 def build_telegram_payload(reply: BotReply) -> dict[str, Any]:
-    """
-    回傳統一結構：
-      text, parse_mode, reply_markup, photo_bytes?, photo_caption?
-    """
     text = _safe_html_truncate(format_from_reply(reply))
     payload: dict[str, Any] = {
         "text": text,
@@ -259,15 +281,12 @@ def build_telegram_payload(reply: BotReply) -> dict[str, Any]:
 
 
 def normalize_telegram_text(text: str) -> str:
-    """處理 /start、/help 等指令與空白。"""
     t = (text or "").strip()
     if not t:
         return "開始"
     if t.startswith("/"):
-        # /start@BotName → start
         cmd = t[1:].split("@", 1)[0].split(None, 1)
         name = (cmd[0] or "").lower()
-        rest = cmd[1] if len(cmd) > 1 else ""
         mapping = {
             "start": "開始",
             "help": "說明",
@@ -276,10 +295,13 @@ def normalize_telegram_text(text: str) -> str:
             "usd": "USD",
             "jpy": "JPY",
             "eur": "EUR",
+            "subscribe": "訂閱",
+            "unsubscribe": "取消訂閱",
+            "push_test": "推送測試",
         }
         if name in mapping:
             return mapping[name]
-        if rest:
-            return f"{name} {rest}".strip()
+        if len(cmd) > 1:
+            return f"{name} {cmd[1]}".strip()
         return name
     return t

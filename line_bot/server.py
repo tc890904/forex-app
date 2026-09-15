@@ -37,7 +37,13 @@ from linebot.v3.webhooks import (
     TextMessageContent,
 )
 
-from bot_core import BotReply, handle_query, schedule_daily_warm, start_push_schedulers
+from bot_core import (
+    BotReply,
+    get_push_status,
+    handle_query,
+    schedule_daily_warm,
+    start_push_schedulers,
+)
 from ui import (
     build_error_flex,
     build_rate_detail_flex,
@@ -426,12 +432,13 @@ def _tg_should_handle_chat(chat: dict, message: dict) -> bool:
 def _tg_process_text(chat_id: str, user_id: str, text: str) -> None:
     """解析指令 → handle_query → 發送訊息／圖片。"""
     norm = normalize_telegram_text(text)
-    logger.info("Telegram 處理: raw=%r norm=%r user=%s", text, norm, user_id)
+    logger.info("Telegram 處理: raw=%r norm=%r user=%s chat=%s", text, norm, user_id, chat_id)
 
     tg_sender.send_chat_action(chat_id, "typing")
 
     try:
-        reply = handle_query(norm, user_id=f"tg:{user_id}")
+        cid = int(chat_id) if str(chat_id).lstrip("-").isdigit() else None
+        reply = handle_query(norm, user_id=f"tg:{user_id}", chat_id=cid)
     except Exception:
         logger.exception("Telegram handle_query 失敗")
         tg_sender.send_message(
@@ -522,8 +529,25 @@ def telegram_health():
             "token_set": ready,
             "webhook_path": TELEGRAM_WEBHOOK_PATH,
             "secret_set": bool(TELEGRAM_WEBHOOK_SECRET),
+            "push": get_push_status(),
         }
     ), (200 if ready else 503)
+
+
+@app.route("/telegram/push_status", methods=["GET"])
+def telegram_push_status():
+    """推播排程與訂閱統計。"""
+    return jsonify(
+        {
+            "ok": True,
+            "telegram_enabled": tg_sender.enabled,
+            **get_push_status(),
+            "note": (
+                "Free 方案若休眠，09:00 可能漏推；"
+                "可用外部 cron 打 /health 保活，或輸入「推送測試」驗證內容。"
+            ),
+        }
+    )
 
 
 @app.route("/telegram/set_webhook", methods=["POST"])

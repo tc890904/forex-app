@@ -33,6 +33,8 @@ line_bot/static/images/*.png
 line_bot/static/charts/*.png
 !line_bot/static/images/.gitkeep
 !line_bot/static/charts/.gitkeep
+line_bot/data/subscriptions.json
+!line_bot/data/.gitkeep
 
 # IDE
 .vscode/
