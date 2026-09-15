@@ -242,9 +242,10 @@ def enqueue_notification(chat_id: int, message: str, reply_markup=None) -> None:
 # —— 每日報告與價格監控背景線程 —————————————————————————————
 
 
-def _start_notification_daemon(tg_sender):
+def _start_notification_daemon(tg_sender) -> None:
     """啟動通知發送背景線程。"""
-    def _daemon():
+
+    def _daemon() -> None:
         logger.info("通知發送線程啟動")
         while True:
             try:
@@ -257,135 +258,149 @@ def _start_notification_daemon(tg_sender):
     threading.Thread(target=_daemon, daemon=True, name="tg-notification").start()
 
 
-def _daily_report_scheduled(
-    token: str,
+def _daily_report_loop(
+    sender,
     schedule_hour: int = 9,
     schedule_minute: int = 0,
-    currencies: list[str] = None,
-):
+    currencies: Optional[list[str]] = None,
+) -> None:
     """在指定時間（默認台北時間 9 AM）發送每日匯率報告。"""
     import time as _time
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-    sender = TelegramSender(token)
     currencies = currencies or ["USD", "JPY", "EUR", "GBP"]
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("查看詳情", callback_data="dashboard")]
-    ])
-
-    last_run_date = None
+    keyboard = {
+        "inline_keyboard": [[{"text": "匯率速覽", "callback_data": "匯率"}]]
+    }
+    last_run_date: Optional[str] = None
 
     while True:
         try:
             now = datetime.now(TAIPEI)
             today_str = now.date().isoformat()
-
-            # 檢查是否到了發送時間
-            target_time = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
+            target_time = now.replace(
+                hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0
+            )
             if now >= target_time and last_run_date != today_str:
                 logger.info("發送每日匯率報告 %s", today_str)
-
-                # 抓取匯率
-                results = {}
-                for code in currencies:
-                    results[code] = analyze_currency(code)
-
-                # 組建訊息
-                lines = ["🌅 FOREX DESK 每日匯率"]
-                lines.append(f"📅 {today_str}")
-                lines.append("")
-
+                results = {code: analyze_currency(code) for code in currencies}
+                lines = [
+                    "<b>FOREX DESK 每日匯率</b>",
+                    f"日期 {today_str}",
+                    "",
+                ]
                 for code in currencies:
                     r = results.get(code)
                     if r and "error" not in r:
                         name = CURRENCY_NAMES.get(code, code)
                         rate = r["rate"]["spot_sell"]
                         mood = r["mood"]
-                        lines.append(f"{code} {name}: **{rate:.4f}** {mood}")
+                        lines.append(f"{code} {name}: <b>{rate:.4f}</b> {mood}")
                     else:
                         lines.append(f"{code}: 暫無資料")
-
-                lines.append("")
-                lines.append("輸入「說明」查看完整功能")
-
+                lines.extend(["", "輸入「說明」查看完整功能"])
                 message = "\n".join(lines)
 
-                # 發送給所有訂閱者
                 with _SUB_LOCK:
-                    subscribers = [uid for uid, sub in _SUBSCRIPTIONS.items() if sub.get("daily_rates")]
-
+                    subscribers = [
+                        uid for uid, sub in _SUBSCRIPTIONS.items() if sub.get("daily_rates")
+                    ]
                 for uid in subscribers:
                     try:
-                        chat_id = uid.replace("tg:", "")  # 轉換回 chat_id
+                        chat_id = uid.replace("tg:", "")
                         if chat_id and sender.enabled:
-                            sender.send_message(int(chat_id), message, reply_markup=keyboard)
+                            sender.send_message(
+                                int(chat_id), message, reply_markup=keyboard
+                            )
                             logger.info("每日報告已發送 chat=%s", chat_id)
                     except Exception:
                         logger.exception("發送每日報告失敗 chat=%s", uid)
-
                 last_run_date = today_str
-
-            _time.sleep(60)  # 每分鐘檢查一次
-
+            _time.sleep(60)
         except Exception:
             logger.exception("每日報告線程出錯")
             _time.sleep(60)
 
 
-def _price_alert_monitor(
-    token: str,
-    currencies: list[str] = None,
+def _price_alert_loop(
+    sender,
+    currencies: Optional[list[str]] = None,
     check_interval: int = ALERT_CHECK_INTERVAL,
-):
+) -> None:
     """每 N 秒檢查一次價格觸發條件。"""
     import time as _time
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-    sender = TelegramSender(token)
     currencies = currencies or ["USD", "JPY", "EUR", "GBP"]
-
     while True:
         try:
-            # 抓取最新匯率
-            results = {}
-            for code in currencies:
-                results[code] = analyze_currency(code)
-
-            # 檢查每個訂閱者的條件
+            results = {code: analyze_currency(code) for code in currencies}
             now = _time.time()
             with _SUB_LOCK:
                 subscribers = list(_SUBSCRIPTIONS.items())
 
             for uid, sub in subscribers:
                 for alert in sub.get("alerts", []):
-                    # 檢查是否該再次通知
                     if now - alert.last_notified_ts < ALERT_MIN_INTERVAL:
                         continue
-
                     rate_data = results.get(alert.code)
                     if not rate_data or "error" in rate_data:
                         continue
-
                     rate = rate_data["rate"]["spot_sell"]
-                    triggered = False
-                    if alert.operator == ">" and rate > alert.threshold:
-                        triggered = True
-                    elif alert.operator == "<" and rate < alert.threshold:
-                        triggered = True
-
-                    if triggered:
-                        chat_id = uid.replace("tg:", "")
-                        if chat_id and sender.enabled:
-                            message = f"🔔 價格觸發通知\n\n{alert.code} 目前 **{rate:.4f}**\n已超過 {alert.operator} {alert.threshold}"
-                            sender.send_message(int(chat_id), message)
-                            alert.last_notified_ts = now
-                            logger.info("價格通知已發送 chat=%s %s %.4f", chat_id, alert.code, rate)
-
+                    triggered = (
+                        (alert.operator == ">" and rate > alert.threshold)
+                        or (alert.operator == "<" and rate < alert.threshold)
+                    )
+                    if not triggered:
+                        continue
+                    chat_id = uid.replace("tg:", "")
+                    if chat_id and sender.enabled:
+                        message = (
+                            f"<b>價格觸發通知</b>\n\n"
+                            f"{alert.code} 目前 <b>{rate:.4f}</b>\n"
+                            f"條件：{alert.operator} {alert.threshold}"
+                        )
+                        sender.send_message(int(chat_id), message)
+                        alert.last_notified_ts = now
+                        logger.info(
+                            "價格通知已發送 chat=%s %s %.4f", chat_id, alert.code, rate
+                        )
             _time.sleep(check_interval)
-
         except Exception:
             logger.exception("價格監控線程出錯")
             _time.sleep(check_interval)
+
+
+def start_push_schedulers(tg_sender, schedule_hour: int = 9, schedule_minute: int = 0) -> None:
+    """以 daemon thread 啟動每日報告與價格監控（不可同步阻塞）。"""
+    if not getattr(tg_sender, "enabled", False):
+        logger.warning("Telegram 未啟用，略過推播排程")
+        return
+    _start_notification_daemon(tg_sender)
+    threading.Thread(
+        target=_daily_report_loop,
+        kwargs={
+            "sender": tg_sender,
+            "schedule_hour": schedule_hour,
+            "schedule_minute": schedule_minute,
+        },
+        daemon=True,
+        name="tg-daily-report",
+    ).start()
+    threading.Thread(
+        target=_price_alert_loop,
+        kwargs={"sender": tg_sender},
+        daemon=True,
+        name="tg-price-alert",
+    ).start()
+    logger.info("Telegram 推播排程已啟動（每日 %02d:%02d + 價格監控）", schedule_hour, schedule_minute)
+
+
+# 相容舊名稱（勿直接呼叫；會阻塞）
+def _daily_report_scheduled(*args, **kwargs):
+    raise RuntimeError("請改用 start_push_schedulers()，勿同步呼叫排程迴圈")
+
+
+def _price_alert_monitor(*args, **kwargs):
+    raise RuntimeError("請改用 start_push_schedulers()，勿同步呼叫排程迴圈")
 
 
 @dataclass
@@ -1103,6 +1118,20 @@ def handle_query(text: str, user_id: Optional[str] = None) -> BotReply:
     """處理用戶輸入，回傳 BotReply。"""
     schedule_daily_warm()
     text = (text or "").strip()
+    # Telegram /start /help 等（webhook 會先 normalize；此處雙保險）
+    if text.startswith("/"):
+        cmd = text[1:].split("@", 1)[0].split(None, 1)
+        name = (cmd[0] or "").lower()
+        mapping = {
+            "start": "開始",
+            "help": "說明",
+            "menu": "說明",
+            "rates": "匯率",
+            "subscribe": "訂閱",
+            "unsubscribe": "取消訂閱",
+        }
+        if name in mapping:
+            text = mapping[name]
     last = _get_last(user_id)
 
     if not text or text.lower() in ("hi", "hello", "你好", "嗨", "開始", "start", "歡迎"):
@@ -1274,7 +1303,7 @@ def handle_query(text: str, user_id: Optional[str] = None) -> BotReply:
             kind="welcome",
         )
 
-
+    if text.startswith("加入") or text.lower().startswith("add "):
         rest = text[2:].strip() if text.startswith("加入") else text[4:].strip()
         code = resolve_currency(rest) if rest else last
         if not code or code == "TWD":

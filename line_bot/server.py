@@ -37,7 +37,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
 )
 
-from bot_core import BotReply, handle_query, schedule_daily_warm, _start_notification_daemon, _daily_report_scheduled, _price_alert_monitor
+from bot_core import BotReply, handle_query, schedule_daily_warm, start_push_schedulers
 from ui import (
     build_error_flex,
     build_rate_detail_flex,
@@ -107,19 +107,10 @@ try:
 except Exception:
     logger.exception("啟動預熱失敗")
 
-# 啟動通知背景線程
+# 啟動通知背景線程（必須 daemon，不可同步跑 while True）
 if tg_sender.enabled:
     try:
-        _start_notification_daemon(tg_sender)
-        _daily_report_scheduled(
-            token=TELEGRAM_BOT_TOKEN,
-            schedule_hour=9,
-            schedule_minute=0,
-        )
-        _price_alert_monitor(
-            token=TELEGRAM_BOT_TOKEN,
-            check_interval=ALERT_CHECK_INTERVAL,
-        )
+        start_push_schedulers(tg_sender, schedule_hour=9, schedule_minute=0)
     except Exception:
         logger.exception("啟動通知線程失敗")
 
