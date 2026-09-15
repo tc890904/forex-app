@@ -37,7 +37,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
 )
 
-from bot_core import BotReply, handle_query, schedule_daily_warm
+from bot_core import BotReply, handle_query, schedule_daily_warm, _start_notification_daemon, _daily_report_scheduled, _price_alert_monitor
 from ui import (
     build_error_flex,
     build_rate_detail_flex,
@@ -106,6 +106,22 @@ try:
     schedule_daily_warm()
 except Exception:
     logger.exception("啟動預熱失敗")
+
+# 啟動通知背景線程
+if tg_sender.enabled:
+    try:
+        _start_notification_daemon(tg_sender)
+        _daily_report_scheduled(
+            token=TELEGRAM_BOT_TOKEN,
+            schedule_hour=9,
+            schedule_minute=0,
+        )
+        _price_alert_monitor(
+            token=TELEGRAM_BOT_TOKEN,
+            check_interval=ALERT_CHECK_INTERVAL,
+        )
+    except Exception:
+        logger.exception("啟動通知線程失敗")
 
 
 def _truncate_text(text: str) -> str:

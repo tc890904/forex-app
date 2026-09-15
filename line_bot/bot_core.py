@@ -11,6 +11,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -142,6 +143,249 @@ _CACHE_TTL_SEC = 3600.0  # 當日內最長 1 小時，避免盤中不更新
 _WARM_DAY: Optional[str] = None
 _WARM_LOCK = threading.Lock()
 _CACHE_LOCK = threading.Lock()
+
+# —— 通知佇列與訂閱系統（Telegram 每日報告 / 價格觸發）——————————————————
+from queue import Queue
+
+_NotiQueue = Queue
+_NOTIFICATION_QUEUE: _NotiQueue = _NotiQueue()
+_SUBSCRIPTIONS: dict[str, dict] = {}  # {user_id: {"daily_rates": bool, "alerts": list[AlertSpec]}}
+_SUB_LOCK = threading.Lock()
+
+
+@dataclass
+class AlertSpec:
+    code: str
+    operator: str  # ">" or "<"
+    threshold: float
+    last_notified_ts: float = 0.0  # 防止頻繁通知（至少間隔 30 分鐘）
+
+
+ALERT_MIN_INTERVAL = 1800  # 30 分鐘內不重複通知同一條件
+ALERT_CHECK_INTERVAL = 120  # 每 2 分鐘檢查一次
+
+
+# —— 訂閱/通知 API ——————————————————————————————————————————————
+
+
+def subscribe_daily_rates(user_id: str) -> bool:
+    """訂閱每日匯率報告（早上 9 點推送）。"""
+    with _SUB_LOCK:
+        sub = _SUBSCRIPTIONS.setdefault(user_id, {"daily_rates": False, "alerts": []})
+        if sub["daily_rates"]:
+            return False  # 已訂閱
+        sub["daily_rates"] = True
+        logger.info("用戶 %s 訂閱每日匯率報告", user_id)
+        return True
+
+
+def unsubscribe_daily_rates(user_id: str) -> bool:
+    """取消訂閱每日匯率報告。"""
+    with _SUB_LOCK:
+        sub = _SUBSCRIPTIONS.get(user_id)
+        if not sub or not sub.get("daily_rates"):
+            return False
+        sub["daily_rates"] = False
+        logger.info("用戶 %s 取消訂閱每日匯率報告", user_id)
+        return True
+
+
+def subscribe_alert(user_id: str, code: str, operator: str, threshold: float) -> bool:
+    """訂閱價格觸發通知。"""
+    alert = AlertSpec(code=code, operator=operator, threshold=threshold)
+    with _SUB_LOCK:
+        sub = _SUBSCRIPTIONS.setdefault(user_id, {"daily_rates": False, "alerts": []})
+        for existing in sub["alerts"]:
+            if existing.code == code and existing.operator == operator and abs(existing.threshold - threshold) < 0.001:
+                return False  # 已存在
+        sub["alerts"].append(alert)
+        logger.info("用戶 %s 訂閱 %s %s %.4f", user_id, code, operator, threshold)
+        return True
+
+
+def unsubscribe_alert(user_id: str, code: str, operator: str, threshold: float) -> bool:
+    """取消訂閱價格觸發通知。"""
+    with _SUB_LOCK:
+        sub = _SUBSCRIPTIONS.get(user_id)
+        if not sub:
+            return False
+        before = len(sub["alerts"])
+        sub["alerts"] = [
+            a for a in sub["alerts"]
+            if not (a.code == code and a.operator == operator and abs(a.threshold - threshold) < 0.001)
+        ]
+        if len(sub["alerts"]) < before:
+            logger.info("用戶 %s 取消訂閱 %s %s %.4f", user_id, code, operator, threshold)
+            return True
+        return False
+
+
+def get_subscriptions(user_id: str) -> dict:
+    """取得用戶的訂閱狀態。"""
+    with _SUB_LOCK:
+        sub = _SUBSCRIPTIONS.get(user_id, {"daily_rates": False, "alerts": []})
+        return {
+            "daily_rates": sub.get("daily_rates", False),
+            "alerts": [
+                {"code": a.code, "operator": a.operator, "threshold": a.threshold}
+                for a in sub.get("alerts", [])
+            ],
+        }
+
+
+def enqueue_notification(chat_id: int, message: str, reply_markup=None) -> None:
+    """將通知加入佇列，由背景線程負責發送。"""
+    _NOTIFICATION_QUEUE.put((chat_id, message, reply_markup))
+    logger.info("通知已加入佇列 chat=%s", chat_id)
+
+
+# —— 每日報告與價格監控背景線程 —————————————————————————————
+
+
+def _start_notification_daemon(tg_sender):
+    """啟動通知發送背景線程。"""
+    def _daemon():
+        logger.info("通知發送線程啟動")
+        while True:
+            try:
+                chat_id, message, reply_markup = _NOTIFICATION_QUEUE.get(timeout=5)
+                if tg_sender.enabled:
+                    tg_sender.send_message(chat_id, message, reply_markup=reply_markup)
+            except Exception:
+                pass  # 超時或出錯都繼續
+
+    threading.Thread(target=_daemon, daemon=True, name="tg-notification").start()
+
+
+def _daily_report_scheduled(
+    token: str,
+    schedule_hour: int = 9,
+    schedule_minute: int = 0,
+    currencies: list[str] = None,
+):
+    """在指定時間（默認台北時間 9 AM）發送每日匯率報告。"""
+    import time as _time
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    sender = TelegramSender(token)
+    currencies = currencies or ["USD", "JPY", "EUR", "GBP"]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("查看詳情", callback_data="dashboard")]
+    ])
+
+    last_run_date = None
+
+    while True:
+        try:
+            now = datetime.now(TAIPEI)
+            today_str = now.date().isoformat()
+
+            # 檢查是否到了發送時間
+            target_time = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
+            if now >= target_time and last_run_date != today_str:
+                logger.info("發送每日匯率報告 %s", today_str)
+
+                # 抓取匯率
+                results = {}
+                for code in currencies:
+                    results[code] = analyze_currency(code)
+
+                # 組建訊息
+                lines = ["🌅 FOREX DESK 每日匯率"]
+                lines.append(f"📅 {today_str}")
+                lines.append("")
+
+                for code in currencies:
+                    r = results.get(code)
+                    if r and "error" not in r:
+                        name = CURRENCY_NAMES.get(code, code)
+                        rate = r["rate"]["spot_sell"]
+                        mood = r["mood"]
+                        lines.append(f"{code} {name}: **{rate:.4f}** {mood}")
+                    else:
+                        lines.append(f"{code}: 暫無資料")
+
+                lines.append("")
+                lines.append("輸入「說明」查看完整功能")
+
+                message = "\n".join(lines)
+
+                # 發送給所有訂閱者
+                with _SUB_LOCK:
+                    subscribers = [uid for uid, sub in _SUBSCRIPTIONS.items() if sub.get("daily_rates")]
+
+                for uid in subscribers:
+                    try:
+                        chat_id = uid.replace("tg:", "")  # 轉換回 chat_id
+                        if chat_id and sender.enabled:
+                            sender.send_message(int(chat_id), message, reply_markup=keyboard)
+                            logger.info("每日報告已發送 chat=%s", chat_id)
+                    except Exception:
+                        logger.exception("發送每日報告失敗 chat=%s", uid)
+
+                last_run_date = today_str
+
+            _time.sleep(60)  # 每分鐘檢查一次
+
+        except Exception:
+            logger.exception("每日報告線程出錯")
+            _time.sleep(60)
+
+
+def _price_alert_monitor(
+    token: str,
+    currencies: list[str] = None,
+    check_interval: int = ALERT_CHECK_INTERVAL,
+):
+    """每 N 秒檢查一次價格觸發條件。"""
+    import time as _time
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    sender = TelegramSender(token)
+    currencies = currencies or ["USD", "JPY", "EUR", "GBP"]
+
+    while True:
+        try:
+            # 抓取最新匯率
+            results = {}
+            for code in currencies:
+                results[code] = analyze_currency(code)
+
+            # 檢查每個訂閱者的條件
+            now = _time.time()
+            with _SUB_LOCK:
+                subscribers = list(_SUBSCRIPTIONS.items())
+
+            for uid, sub in subscribers:
+                for alert in sub.get("alerts", []):
+                    # 檢查是否該再次通知
+                    if now - alert.last_notified_ts < ALERT_MIN_INTERVAL:
+                        continue
+
+                    rate_data = results.get(alert.code)
+                    if not rate_data or "error" in rate_data:
+                        continue
+
+                    rate = rate_data["rate"]["spot_sell"]
+                    triggered = False
+                    if alert.operator == ">" and rate > alert.threshold:
+                        triggered = True
+                    elif alert.operator == "<" and rate < alert.threshold:
+                        triggered = True
+
+                    if triggered:
+                        chat_id = uid.replace("tg:", "")
+                        if chat_id and sender.enabled:
+                            message = f"🔔 價格觸發通知\n\n{alert.code} 目前 **{rate:.4f}**\n已超過 {alert.operator} {alert.threshold}"
+                            sender.send_message(int(chat_id), message)
+                            alert.last_notified_ts = now
+                            logger.info("價格通知已發送 chat=%s %s %.4f", chat_id, alert.code, rate)
+
+            _time.sleep(check_interval)
+
+        except Exception:
+            logger.exception("價格監控線程出錯")
+            _time.sleep(check_interval)
 
 
 @dataclass
@@ -889,7 +1133,148 @@ def handle_query(text: str, user_id: Optional[str] = None) -> BotReply:
     if text in ("我的清單", "清單", "watchlist"):
         return _reply_watchlist(user_id)
 
-    if text.startswith("加入") or text.lower().startswith("add "):
+    # 訂閱系統指令
+    if text.lower() in ("訂閱", "訂閱每日匯率", "/subscribe"):
+        if not user_id:
+            return BotReply(
+                alt_text="需登入 Telegram",
+                flex=build_error_flex("無使用者", "需在 Telegram 私訊中使用。"),
+                text_fallback="請在 Telegram 私訊中使用此功能。",
+                kind="error",
+            )
+        if subscribe_daily_rates(user_id):
+            return BotReply(
+                alt_text="已訂閱每日匯率",
+                flex=build_welcome_flex(),
+                text_fallback=f"✅ 已訂閱每日 9:00 匯率報告\n輸入「取消訂閱」可取消",
+                kind="welcome",
+            )
+        return BotReply(
+            alt_text="已經訂閱",
+            flex=build_welcome_flex(),
+            text_fallback="你已經訂閱了每日匯率報告。",
+            kind="welcome",
+        )
+
+    if text.lower() in ("取消訂閱", "unsubscribe", "/unsubscribe"):
+        if not user_id:
+            return BotReply(
+                alt_text="需登入 Telegram",
+                flex=build_error_flex("無使用者", "需在 Telegram 私訊中使用。"),
+                text_fallback="請在 Telegram 私訊中使用此功能。",
+                kind="error",
+            )
+        if unsubscribe_daily_rates(user_id):
+            return BotReply(
+                alt_text="已取消訂閱",
+                flex=build_welcome_flex(),
+                text_fallback="✅ 已取消每日匯率報告訂閱。",
+                kind="welcome",
+            )
+        return BotReply(
+            alt_text="尚未訂閱",
+            flex=build_welcome_flex(),
+            text_fallback="你尚未訂閱每日匯率報告。",
+            kind="welcome",
+        )
+
+    if text.lower() in ("我的訂閱", "訂閱清單", "/subscriptions"):
+        if not user_id:
+            return BotReply(
+                alt_text="需登入 Telegram",
+                flex=build_error_flex("無使用者", "需在 Telegram 私訊中使用。"),
+                text_fallback="請在 Telegram 私訊中使用此功能。",
+                kind="error",
+            )
+        sub = get_subscriptions(user_id)
+        lines = ["📋 我的訂閱"]
+        lines.append(f"每日匯率報告: {'✅ 已訂閱' if sub['daily_rates'] else '❌ 未訂閱'}")
+        if sub["alerts"]:
+            lines.append("")
+            lines.append("價格監聽：")
+            for a in sub["alerts"]:
+                op = "↑ 高於" if a.operator == ">" else "↓ 低於"
+                lines.append(f"  • {a.code} {op} {a.threshold:.4f}")
+        else:
+            lines.append("價格監聽：無")
+        lines.append("")
+        lines.append("指令：「訂閱」/「取消訂閱」")
+        lines.append("指令：「監視 USD > 32」/「取消監視 USD > 32」")
+        return BotReply(
+            alt_text="訂閱狀態",
+            flex=build_error_flex("訂閱清單", "\n".join(lines)),
+            text_fallback="\n".join(lines),
+            kind="generic",
+        )
+
+    # 價格觸發訂閱
+    m = re.match(r"^監視\s+(\w+)\s*([<>])\s*(\d+\.?\d*)$", text, re.IGNORECASE)
+    if m:
+        code = resolve_currency(m.group(1))
+        operator = m.group(2).upper()
+        threshold = float(m.group(3))
+        if not code or code == "TWD":
+            return BotReply(
+                alt_text="幣別錯誤",
+                flex=build_error_flex("幣別錯誤", f"無法識別 {m.group(1)}，請使用有效幣別代碼。"),
+                text_fallback=f"無法識別幣別：{m.group(1)}",
+                kind="error",
+            )
+        if operator not in (">", "<"):
+            return BotReply(
+                alt_text="操作符錯誤",
+                flex=build_error_flex("操作符錯誤", "請使用 > 或 <，例如：監視 USD > 32"),
+                text_fallback="操作符錯誤",
+                kind="error",
+            )
+        if not user_id:
+            return BotReply(
+                alt_text="需登入 Telegram",
+                flex=build_error_flex("無使用者", "需在 Telegram 私訊中使用此功能。"),
+                text_fallback="請在 Telegram 私訊中使用此功能。",
+                kind="error",
+            )
+        if subscribe_alert(user_id, code, operator, threshold):
+            return BotReply(
+                alt_text=f"已監聽 {code}",
+                flex=build_welcome_flex(),
+                text_fallback=f"✅ 已設置監聽：{code} {operator} {threshold:.4f}\n當價格觸發時會通知你。",
+                kind="welcome",
+            )
+        return BotReply(
+            alt_text="已存在監聽",
+            flex=build_welcome_flex(),
+            text_fallback=f"你已經監聽 {code} {operator} {threshold:.4f}。",
+            kind="welcome",
+        )
+
+    m2 = re.match(r"^取消監視\s+(\w+)\s*([<>])\s*(\d+\.?\d*)$", text, re.IGNORECASE)
+    if m2:
+        code = resolve_currency(m2.group(1))
+        operator = m2.group(2).upper()
+        threshold = float(m2.group(3))
+        if not user_id:
+            return BotReply(
+                alt_text="需登入 Telegram",
+                flex=build_error_flex("無使用者", "需在 Telegram 私訊中使用此功能。"),
+                text_fallback="請在 Telegram 私訊中使用此功能。",
+                kind="error",
+            )
+        if unsubscribe_alert(user_id, code, operator, threshold):
+            return BotReply(
+                alt_text=f"已取消監聽 {code}",
+                flex=build_welcome_flex(),
+                text_fallback=f"✅ 已取消監聽 {code} {operator} {threshold:.4f}",
+                kind="welcome",
+            )
+        return BotReply(
+            alt_text="監聽不存在",
+            flex=build_welcome_flex(),
+            text_fallback=f"你沒有監聽 {code} {operator} {threshold:.4f}。",
+            kind="welcome",
+        )
+
+
         rest = text[2:].strip() if text.startswith("加入") else text[4:].strip()
         code = resolve_currency(rest) if rest else last
         if not code or code == "TWD":
