@@ -9,7 +9,9 @@ from bot_core import (
     BotReply,
     _extract_currency_from_command,
     _watchlist_add,
+    convert_via_twd,
     handle_query,
+    parse_convert_query,
     resolve_currency,
 )
 from tg_ui import build_telegram_payload, normalize_telegram_text
@@ -60,9 +62,29 @@ check("watchlist full reject", added is False and len(wl) == 10)
 r = handle_query("加入 NZD", user_id=uid)
 check("watchlist full message", "已滿" in r.alt_text or "已滿" in r.text_fallback)
 
+# convert parse
+check("100USD", parse_convert_query("100USD") == (100.0, "USD"))
+check("100 USD", parse_convert_query("100 USD") == (100.0, "USD"))
+check("100美元", parse_convert_query("100美元") == (100.0, "USD"))
+check("USD 50", parse_convert_query("USD 50") == (50.0, "USD"))
+check("換匯 100 USD", parse_convert_query("換匯 100 USD") == (100.0, "USD"))
+check("1,000 JPY", parse_convert_query("1,000 JPY") == (1000.0, "JPY"))
+check("10000TWD", parse_convert_query("10000TWD") == (10000.0, "TWD"))
+check("bare USD not convert", parse_convert_query("USD") is None)
+check("監視 not convert", parse_convert_query("監視 USD > 32") is None)
+check("槓桿 not convert", parse_convert_query("槓桿 10") is None)
+check("cross math", abs(convert_via_twd(100, 32.0, 0.22) - 100 * 32 / 0.22) < 1e-9)
+
+# convert hint
+c0 = handle_query("換匯", user_id="tg:fx")
+check("convert hint kind", c0.kind == "convert")
+p0 = build_telegram_payload(c0)
+check("convert hint text", "100USD" in p0["text"] or "換匯" in p0["text"])
+
 # TG normalize
 check("/start", normalize_telegram_text("/start") == "開始")
 check("/start@Bot", normalize_telegram_text("/start@MyBot") == "開始")
+check("/convert 100USD", normalize_telegram_text("/convert 100USD") == "換匯 100USD")
 
 # welcome kind
 w = handle_query("開始", user_id="tg:x")

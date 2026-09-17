@@ -49,6 +49,7 @@ from ui import (
     build_signals_flex,
     build_watchlist_flex,
     build_welcome_flex,
+    build_convert_flex,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -94,12 +95,15 @@ CURRENCY_ALIASES: dict[str, str] = {
     "越南盾": "VND",
     "馬來幣": "MYR",
     "美金": "USD",
+    "TWD": "TWD",
     "台幣": "TWD",
+    "新台幣": "TWD",
     "瑞郎": "CHF",
     "新幣": "SGD",
 }
 
 CURRENCY_NAMES = {
+    "TWD": "新台幣",
     "USD": "美元",
     "JPY": "日圓",
     "EUR": "歐元",
@@ -397,17 +401,33 @@ def enqueue_notification(chat_id: int, message: str, reply_markup=None) -> None:
     logger.info("通知已加入佇列 chat=%s", chat_id)
 
 
+_TG_FLAGS = {
+    "USD": "🇺🇸",
+    "JPY": "🇯🇵",
+    "EUR": "🇪🇺",
+    "GBP": "🇬🇧",
+    "AUD": "🇦🇺",
+    "CAD": "🇨🇦",
+    "CHF": "🇨🇭",
+    "CNY": "🇨🇳",
+    "HKD": "🇭🇰",
+    "SGD": "🇸🇬",
+    "NZD": "🇳🇿",
+}
+
+
 def format_daily_report_html(currencies: Optional[list[str]] = None) -> str:
     """產生每日推播 HTML 內容。"""
     currencies = currencies or ["USD", "JPY", "EUR", "GBP"]
     today_str = _today()
     results = {code: analyze_currency(code) for code in currencies}
     lines = [
-        "<b>FOREX DESK 每日匯率</b>",
-        f"台北時間 {today_str} · 09:00 報告",
+        "<b>FOREX DESK · 每日匯率</b>",
+        f"台北 {today_str} · 09:00",
         "",
     ]
     for code in currencies:
+        flag = _TG_FLAGS.get(code, "💱")
         r = results.get(code)
         if r and "error" not in r:
             name = CURRENCY_NAMES.get(code, code)
@@ -416,15 +436,14 @@ def format_daily_report_html(currencies: Optional[list[str]] = None) -> str:
             ch_s = f"{ch:+.2f}%" if ch is not None else "—"
             mood = r.get("mood", "")
             arrow = "▲" if (ch or 0) > 0 else ("▼" if (ch or 0) < 0 else "·")
-            lines.append(
-                f"<b>{code}</b> {name}  <b>{rate:.4f}</b>  {arrow} {ch_s}  · {mood}"
-            )
+            lines.append(f"{flag} <b>{code}</b>  {name}")
+            lines.append(f"   <b>{rate:.4f}</b>  {arrow} {ch_s}  · {mood}")
         else:
-            lines.append(f"<b>{code}</b> 暫無資料")
+            lines.append(f"{flag} <b>{code}</b>  暫無資料")
     lines.extend(
         [
             "",
-            "點下方快速操作，或輸入「我的訂閱」管理推播。",
+            "點下方按鈕查看更多，或輸入「我的訂閱」管理。",
             "<i>僅供參考，非投資建議。</i>",
         ]
     )
@@ -437,10 +456,14 @@ def dispatch_daily_reports(sender) -> int:
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "強弱", "callback_data": "強弱"},
-                {"text": "訊號", "callback_data": "訊號"},
+                {"text": "強弱排行", "callback_data": "強弱"},
+                {"text": "訊號比較", "callback_data": "訊號"},
+            ],
+            [
+                {"text": "🇺🇸 USD", "callback_data": "USD"},
+                {"text": "🇯🇵 JPY", "callback_data": "JPY"},
                 {"text": "我的訂閱", "callback_data": "我的訂閱"},
-            ]
+            ],
         ]
     }
     with _SUB_LOCK:
@@ -504,21 +527,30 @@ def dispatch_price_alerts(sender) -> int:
             if not triggered:
                 continue
             name = CURRENCY_NAMES.get(alert.code, alert.code)
+            flag = _TG_FLAGS.get(alert.code, "💱")
             op_txt = "高於" if alert.operator == ">" else "低於"
             message = (
                 f"<b>價格觸發</b>\n\n"
-                f"<b>{alert.code}</b> {name}\n"
+                f"{flag} <b>{alert.code}</b>  {name}\n"
                 f"現價 <b>{rate:.4f}</b>\n"
-                f"條件：{op_txt} {alert.threshold:g}\n\n"
-                f"輸入「取消監視 {alert.code} {alert.operator} {alert.threshold:g}」可關閉。"
+                f"條件：{op_txt} <b>{alert.threshold:g}</b>\n\n"
+                f"取消：<code>取消監視 {alert.code} {alert.operator} {alert.threshold:g}</code>"
             )
             keyboard = {
                 "inline_keyboard": [
                     [
                         {"text": f"查 {alert.code}", "callback_data": alert.code},
                         {"text": "詳情", "callback_data": f"詳情 {alert.code}"},
+                    ],
+                    [
+                        {
+                            "text": "取消此監聽",
+                            "callback_data": (
+                                f"取消監視 {alert.code} {alert.operator} {alert.threshold:g}"
+                            ),
+                        },
                         {"text": "我的訂閱", "callback_data": "我的訂閱"},
-                    ]
+                    ],
                 ]
             }
             if getattr(sender, "enabled", False):
@@ -651,7 +683,8 @@ class BotReply:
     card_mode: str = "summary"  # summary | detail
     qr_mode: str = "home"  # home | currency | tools | market
     last_code: Optional[str] = None
-    kind: str = "generic"  # welcome | help | rate | error | generic
+    kind: str = "generic"  # welcome | help | rate | convert | error | generic
+    _convert_result: Optional[dict] = field(default=None, repr=False)
 
 
 # 使用者狀態（記憶體；重啟後清空）
@@ -948,6 +981,206 @@ def _collect_market(codes: list[str]) -> dict[str, dict]:
                 logger.error("分析失敗 [%s]: %s", code, e)
                 results[code] = {"error": str(e)}
     return results
+
+
+def _twd_per_unit(rate: dict) -> float:
+    """台幣／1 單位外幣：即期賣出優先。"""
+    for key in ("spot_sell", "cash_sell", "spot_buy", "cash_buy"):
+        try:
+            v = float(rate.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v
+    return 0.0
+
+
+def format_money(code: str, amount: float) -> str:
+    """依幣別顯示換匯金額。"""
+    n = float(amount)
+    if abs(n - round(n)) < 1e-9:
+        return f"{n:,.0f}"
+    if code in ("JPY", "KRW", "VND", "IDR"):
+        return f"{n:,.2f}"
+    if abs(n) >= 1000:
+        return f"{n:,.2f}"
+    if abs(n) >= 1:
+        return f"{n:,.4f}"
+    return f"{n:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def convert_via_twd(amount: float, src_twd: float, tgt_twd: float) -> float:
+    """以台幣交叉換算：src_twd / tgt_twd 皆為「台幣／1 單位」。"""
+    if tgt_twd <= 0:
+        raise ValueError("target rate must be positive")
+    return amount * src_twd / tgt_twd
+
+
+def parse_convert_query(text: str) -> Optional[tuple[float, str]]:
+    """
+    解析「100USD / 100 USD / 100美元 / USD 100 / 換匯 100 USD」。
+    成功回傳 (金額, 幣別代碼)，否則 None。
+    """
+    t = (text or "").strip()
+    t = re.sub(r"^(換匯|兌換|換算|convert)\s*", "", t, flags=re.IGNORECASE).strip()
+    if not t:
+        return None
+    t = t.replace(",", "").replace("＄", "").replace("$", "")
+    t = re.sub(r"\s+", " ", t)
+
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([A-Za-z]{3})$", t, re.IGNORECASE)
+    if m:
+        code = resolve_currency(m.group(2))
+        if code:
+            return float(m.group(1)), code
+
+    m = re.match(r"^([A-Za-z]{3})\s+(\d+(?:\.\d+)?)$", t, re.IGNORECASE)
+    if m:
+        code = resolve_currency(m.group(1))
+        if code:
+            return float(m.group(2)), code
+
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(.+)$", t)
+    if m:
+        rest = m.group(2).strip()
+        code = resolve_currency(rest)
+        if code:
+            return float(m.group(1)), code
+    return None
+
+
+def _latest_twd_quote(code: str) -> Optional[tuple[float, str]]:
+    records = _fetch_exchange_data(code, 120)
+    rate = _records_to_rate(code, records)
+    if not rate:
+        return None
+    unit = _twd_per_unit(rate)
+    if unit <= 0:
+        return None
+    return unit, str(rate.get("date") or "")
+
+
+def _convert_target_codes(src: str) -> list[str]:
+    ordered: list[str] = ["TWD"]
+    for c in MAJOR_CURRENCIES:
+        if c not in ordered:
+            ordered.append(c)
+    for c in CURRENCY_NAMES:
+        if c not in ordered and c != "TWD":
+            ordered.append(c)
+    return [c for c in ordered if c != src]
+
+
+def convert_amount(amount: float, src: str) -> dict:
+    """把 amount 單位 src 換成各幣別（台銀即期賣出交叉）。"""
+    src = (src or "").upper()
+    if amount <= 0 or amount > 1e12:
+        return {"error": "金額需介於 0 與 1e12 之間"}
+    if src != "TWD" and src not in CURRENCY_NAMES:
+        return {"error": f"不支援幣別 {src}"}
+
+    date = _today()
+    if src == "TWD":
+        src_twd = 1.0
+        twd_value = amount
+    else:
+        quote = _latest_twd_quote(src)
+        if not quote:
+            return {"error": f"無法取得 {src} 匯率"}
+        src_twd, date = quote
+        twd_value = amount * src_twd
+
+    targets = _convert_target_codes(src)
+    quotes: dict[str, tuple[float, str]] = {}
+    fetch_codes = [c for c in targets if c != "TWD"]
+    if fetch_codes:
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            futs = {ex.submit(_latest_twd_quote, c): c for c in fetch_codes}
+            for fut in as_completed(futs):
+                code = futs[fut]
+                try:
+                    got = fut.result()
+                except Exception:
+                    got = None
+                if got:
+                    quotes[code] = got
+                    if not date:
+                        date = got[1]
+
+    rows: list[dict] = []
+    for code in targets:
+        name = CURRENCY_NAMES.get(code, code)
+        if code == "TWD":
+            rows.append(
+                {
+                    "code": "TWD",
+                    "name": name,
+                    "amount": twd_value,
+                    "display": format_money("TWD", twd_value),
+                }
+            )
+            continue
+        got = quotes.get(code)
+        if not got:
+            rows.append({"code": code, "name": name, "amount": None, "display": "暫無報價"})
+            continue
+        tgt_twd, d2 = got
+        converted = convert_via_twd(amount, src_twd, tgt_twd)
+        rows.append(
+            {
+                "code": code,
+                "name": name,
+                "amount": converted,
+                "display": format_money(code, converted),
+            }
+        )
+        if d2:
+            date = d2
+
+    src_name = CURRENCY_NAMES.get(src, src)
+    return {
+        "amount": amount,
+        "src": src,
+        "src_name": src_name,
+        "src_display": format_money(src, amount),
+        "twd_value": twd_value,
+        "date": date,
+        "rows": rows,
+    }
+
+
+def _reply_convert(
+    amount: float,
+    src: str,
+    user_id: Optional[str] = None,
+) -> BotReply:
+    data = convert_amount(amount, src)
+    if "error" in data:
+        return BotReply(
+            alt_text="換匯失敗",
+            flex=build_error_flex("換匯失敗", data["error"], "範例：100USD 或 10000TWD"),
+            text_fallback=data["error"],
+            qr_mode="home",
+            last_code=_get_last(user_id),
+            kind="error",
+        )
+    if src != "TWD":
+        _set_last(user_id, src)
+    lines = [
+        f"{data['src_display']} {data['src']} 即時換匯",
+        f"台銀即期賣出 · {data.get('date') or ''}",
+    ]
+    for row in data["rows"]:
+        lines.append(f"{row['code']} {row['name']} {row['display']}")
+    return BotReply(
+        alt_text=f"{data['src_display']} {data['src']} 換匯",
+        flex=build_convert_flex(data),
+        text_fallback="\n".join(lines),
+        qr_mode="convert",
+        last_code=src if src != "TWD" else _get_last(user_id),
+        kind="convert",
+        _convert_result=data,
+    )
 
 
 def _watchlist_get(user_id: Optional[str]) -> list[str]:
@@ -1324,6 +1557,7 @@ _KNOWN_CMDS = (
     "移除",
     "我的清單",
     "開始",
+    "換匯",
 )
 
 
@@ -1368,16 +1602,21 @@ def handle_query(
             "rates": "匯率",
             "subscribe": "訂閱",
             "unsubscribe": "取消訂閱",
+            "convert": "換匯",
         }
         if name in mapping:
-            text = mapping[name]
+            mapped = mapping[name]
+            if name == "convert" and len(cmd) > 1:
+                text = f"{mapped} {cmd[1]}".strip()
+            else:
+                text = mapped
     last = _get_last(user_id)
 
     if not text or text.lower() in ("hi", "hello", "你好", "嗨", "開始", "start", "歡迎"):
         return BotReply(
             alt_text="歡迎使用 FOREX DESK",
             flex=build_welcome_flex(),
-            text_fallback="輸入幣別代碼（如 USD）或「說明」開始。也可「訂閱」每日 09:00 推播。",
+            text_fallback="輸入幣別代碼（如 USD）或「100USD」即時換匯。也可「訂閱」每日 09:00 推播。",
             qr_mode="home",
             last_code=last,
             kind="welcome",
@@ -1400,6 +1639,35 @@ def handle_query(
 
     if text in ("我的清單", "清單", "watchlist"):
         return _reply_watchlist(user_id)
+
+    if text.lower() in ("換匯", "兌換", "換算", "convert"):
+        last_ex = last or "USD"
+        return BotReply(
+            alt_text="即時換匯",
+            flex=build_error_flex(
+                "即時換匯",
+                f"輸入金額＋幣別即可換成所有幣別。\n範例：100USD、100 美元、10000TWD",
+                f"也可試：100{last_ex}",
+            ),
+            text_fallback=f"輸入金額＋幣別即可換匯，例如 100USD 或 10000TWD。",
+            qr_mode="convert",
+            last_code=last_ex,
+            kind="convert",
+        )
+
+    # 換匯 100（未寫幣別時用上次查詢）
+    m_amt = re.match(
+        r"^(?:換匯|兌換|換算|convert)\s+(\d+(?:\.\d+)?)$",
+        text,
+        re.IGNORECASE,
+    )
+    if m_amt:
+        return _reply_convert(float(m_amt.group(1).replace(",", "")), last or "USD", user_id)
+
+    parsed = parse_convert_query(text)
+    if parsed:
+        amt, src = parsed
+        return _reply_convert(amt, src, user_id)
 
     # 推播預覽／測試（立即回覆與正式推播相同格式）
     if text.lower() in ("推送測試", "推播測試", "測試推播", "/push_test"):
@@ -1427,11 +1695,11 @@ def handle_query(
                 alt_text="已訂閱每日匯率",
                 flex=build_welcome_flex(),
                 text_fallback=(
-                    "已訂閱每日匯率推播\n"
+                    "✓ 已開啟每日匯率推播\n"
                     "時間：台北 09:00\n"
                     "內容：USD / JPY / EUR / GBP\n\n"
-                    "輸入「推送測試」可立即預覽\n"
-                    "輸入「取消訂閱」可關閉"
+                    "下一步：輸入「推送測試」立刻預覽\n"
+                    "關閉：輸入「取消訂閱」"
                 ),
                 qr_mode="home",
                 last_code=last,
@@ -1440,7 +1708,11 @@ def handle_query(
         return BotReply(
             alt_text="已經訂閱",
             flex=build_welcome_flex(),
-            text_fallback="你已訂閱每日 09:00 匯率報告。\n輸入「推送測試」預覽內容。",
+            text_fallback=(
+                "✓ 你已訂閱每日 09:00 匯率報告\n"
+                "輸入「推送測試」可預覽內容\n"
+                "輸入「我的訂閱」查看全部狀態"
+            ),
             qr_mode="home",
             last_code=last,
             kind="subscribe",
@@ -1458,7 +1730,10 @@ def handle_query(
             return BotReply(
                 alt_text="已取消訂閱",
                 flex=build_welcome_flex(),
-                text_fallback="已取消每日匯率推播。需要時再輸入「訂閱」。",
+                text_fallback=(
+                    "✗ 已關閉每日匯率推播\n"
+                    "需要時再輸入「訂閱」即可重新開啟。"
+                ),
                 qr_mode="home",
                 last_code=last,
                 kind="subscribe",
@@ -1466,7 +1741,7 @@ def handle_query(
         return BotReply(
             alt_text="尚未訂閱",
             flex=build_welcome_flex(),
-            text_fallback="你尚未訂閱每日匯率。輸入「訂閱」即可開啟。",
+            text_fallback="✗ 尚未訂閱每日匯率\n輸入「訂閱」即可開啟台北 09:00 推播。",
             qr_mode="home",
             last_code=last,
             kind="subscribe",
@@ -1482,9 +1757,10 @@ def handle_query(
             )
         sub = get_subscriptions(user_id)
         lines = ["我的訂閱"]
-        lines.append(
-            f"每日匯率：{'已開啟（台北 09:00）' if sub['daily_rates'] else '未開啟'}"
-        )
+        if sub["daily_rates"]:
+            lines.append("每日匯率：已開啟（台北 09:00）")
+        else:
+            lines.append("每日匯率：未開啟")
         if sub["alerts"]:
             lines.append("價格監聽：")
             for a in sub["alerts"]:
@@ -1492,9 +1768,6 @@ def handle_query(
                 lines.append(f"  {a['code']} {op} {a['threshold']:g}")
         else:
             lines.append("價格監聽：無")
-        lines.append("")
-        lines.append("訂閱／取消訂閱／推送測試")
-        lines.append("監視 USD > 32")
         return BotReply(
             alt_text="訂閱狀態",
             flex=build_error_flex("訂閱清單", "\n".join(lines)),
@@ -1537,7 +1810,7 @@ def handle_query(
                 alt_text=f"已監聽 {code}",
                 flex=build_welcome_flex(),
                 text_fallback=(
-                    f"已設定價格監聽\n"
+                    f"✓ 已設定價格監聽\n"
                     f"{code} {op_txt} {threshold:g}\n\n"
                     f"觸發後會私訊通知（約每 2 分鐘檢查）。\n"
                     f"取消：取消監視 {code} {operator} {threshold:g}"
@@ -1549,7 +1822,7 @@ def handle_query(
         return BotReply(
             alt_text="已存在監聽",
             flex=build_welcome_flex(),
-            text_fallback=f"已有相同條件：{code} {operator} {threshold:g}",
+            text_fallback=f"✓ 已有相同條件：{code} {operator} {threshold:g}",
             qr_mode="home",
             last_code=code,
             kind="alert",
@@ -1571,7 +1844,7 @@ def handle_query(
             return BotReply(
                 alt_text=f"已取消監聽 {code}",
                 flex=build_welcome_flex(),
-                text_fallback=f"已取消：{code} {operator} {threshold:g}",
+                text_fallback=f"✗ 已取消：{code} {operator} {threshold:g}",
                 qr_mode="home",
                 last_code=code,
                 kind="alert",
@@ -1579,7 +1852,7 @@ def handle_query(
         return BotReply(
             alt_text="監聽不存在",
             flex=build_welcome_flex(),
-            text_fallback=f"找不到此監聽條件。輸入「我的訂閱」查看。",
+            text_fallback="找不到此監聽條件。輸入「我的訂閱」查看。",
             qr_mode="home",
             last_code=last,
             kind="alert",

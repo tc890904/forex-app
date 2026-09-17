@@ -67,7 +67,7 @@ check("not welcome override", "直接輸入幣別" not in p["text"])
 
 r2 = handle_query("推送測試", user_id=uid, chat_id=chat)
 check("push_test kind", r2.kind == "push_test")
-check("push_test html", "<b>FOREX DESK 每日匯率</b>" in (r2.text_fallback or ""))
+check("push_test html", "每日匯率" in (r2.text_fallback or "") and "<b>" in (r2.text_fallback or ""))
 p2 = build_telegram_payload(r2)
 check("push_test payload", "每日匯率" in p2["text"])
 

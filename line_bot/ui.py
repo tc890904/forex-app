@@ -123,7 +123,7 @@ def contextual_quick_reply(
             ("英鎊", "GBP"),
             ("加入清單", f"加入 {code}"),
             ("我的清單", "我的清單"),
-            ("說明", "說明"),
+            ("換匯", f"100{code}"),
         ]
     elif mode == "tools":
         items = [
@@ -151,10 +151,25 @@ def contextual_quick_reply(
             ("日圓", "JPY"),
             ("歐元", "EUR"),
             ("英鎊", "GBP"),
-            ("澳幣", "AUD"),
             ("人民幣", "CNY"),
             ("港幣", "HKD"),
             ("新幣", "SGD"),
+            ("換匯", "100USD"),
+            ("說明", "說明"),
+        ]
+    elif mode == "convert":
+        items = [
+            ("100USD", "100USD"),
+            ("100JPY", "100JPY"),
+            ("100EUR", "100EUR"),
+            ("10000TWD", "10000TWD"),
+            ("查美元", "USD"),
+            ("市場", "匯率"),
+            ("日圓", "JPY"),
+            ("歐元", "EUR"),
+            ("英鎊", "GBP"),
+            ("強弱", "強弱"),
+            ("我的清單", "我的清單"),
             ("說明", "說明"),
         ]
     else:  # home / welcome
@@ -170,8 +185,8 @@ def contextual_quick_reply(
             ("相關", "相關"),
             ("回測", "回測"),
             ("我的清單", "我的清單"),
+            ("換匯", "100USD"),
             ("情緒", "情緒"),
-            ("說明", "說明"),
         ]
     return QuickReply(
         items=[
@@ -376,7 +391,7 @@ def build_welcome_flex() -> FlexBubble:
             contents=[
                 FlexText(text=BRAND, size="xs", color=ACCENT_SOFT, weight="bold"),
                 FlexText(text="外匯桌面", size="xxl", color=WHITE, weight="bold"),
-                FlexText(text="查價 · 訊號 · 風控，一則訊息搞定", size="xs", color=ACCENT_SOFT),
+                FlexText(text="查價 · 換匯 · 訊號 · 風控", size="xs", color=ACCENT_SOFT),
             ],
         ),
         body=FlexBox(
@@ -386,7 +401,7 @@ def build_welcome_flex() -> FlexBubble:
             contents=[
                 FlexText(text="從這裡開始", size="sm", weight="bold", color=INK),
                 FlexText(
-                    text="點下方按鈕，或直接輸入 USD、匯率、強弱、停損。",
+                    text="點下方按鈕，或直接輸入 USD、100USD、匯率、強弱。",
                     size="sm",
                     color=MUTED,
                     wrap=True,
@@ -397,7 +412,7 @@ def build_welcome_flex() -> FlexBubble:
         ),
         footer=_footer_actions(
             ("查美元匯率", "USD"),
-            ("市場速覽", "匯率"),
+            ("100USD 換匯", "100USD"),
             ("使用說明", "說明"),
         ),
     )
@@ -443,10 +458,11 @@ def build_help_carousel() -> FlexCarousel:
             "查價",
             [
                 ("USD / 美元", "摘要卡 + 日K"),
+                ("100USD", "即時換成各幣別"),
                 ("詳情 USD", "五維評分明細"),
                 ("分析 日圓", "同查價"),
             ],
-            [("查美元", "USD"), ("詳情 USD", "詳情 USD")],
+            [("查美元", "USD"), ("100USD 換匯", "100USD")],
         ),
         (
             "市場",
@@ -866,4 +882,60 @@ def build_watchlist_flex(codes: list[str], names: dict[str, str]) -> FlexBubble:
         ),
         body=FlexBox(layout="vertical", spacing="sm", padding_all="20px", contents=body),
         footer=_footer_actions((f"查 {first}", first), ("加入 USD", "加入 USD"), ("市場", "匯率")),
+    )
+
+
+def build_convert_flex(data: dict) -> FlexBubble:
+    """即時換匯結果：金額＋來源幣別 → 各幣別等值。"""
+    src = data.get("src") or "USD"
+    src_disp = data.get("src_display") or str(data.get("amount", ""))
+    date = data.get("date") or ""
+    rows: list[Any] = [
+        FlexText(
+            text=f"台銀即期賣出交叉 · {date}".rstrip(" ·"),
+            size="xs",
+            color=MUTED,
+        ),
+        FlexSeparator(margin="md", color=LINE),
+    ]
+    for row in data.get("rows") or []:
+        code = row.get("code") or ""
+        label = f"{code} {row.get('name') or ''}".strip()
+        value = str(row.get("display") or "—")
+        color = INK if row.get("amount") is not None else MUTED
+        rows.append(_kv_row(label, value, color))
+    rows.append(
+        FlexText(
+            text="再試 100JPY、10000TWD。參考價，非實際成交。",
+            size="xxs",
+            color=MUTED,
+            wrap=True,
+            margin="md",
+        )
+    )
+    rows.append(FlexText(text=DISCLAIMER, size="xxs", color=ACCENT_SOFT, wrap=True, margin="sm"))
+    last = src if src != "TWD" else "USD"
+    return FlexBubble(
+        size="mega",
+        styles=_styles(),
+        header=FlexBox(
+            layout="vertical",
+            spacing="xs",
+            padding_all="20px",
+            contents=[
+                FlexText(text=BRAND, size="xxs", color=ACCENT_SOFT, weight="bold"),
+                FlexText(text="即時換匯", size="xl", color=WHITE, weight="bold"),
+                FlexText(
+                    text=f"{src_disp} {src} → 各幣別",
+                    size="xs",
+                    color=ACCENT_SOFT,
+                ),
+            ],
+        ),
+        body=FlexBox(layout="vertical", spacing="sm", padding_all="20px", contents=rows),
+        footer=_footer_actions(
+            ("100USD", "100USD"),
+            ("10000TWD", "10000TWD"),
+            (f"查 {last}", last),
+        ),
     )
